@@ -9,6 +9,13 @@ import pandas as pd
 from typing import List, Dict, Optional
 import os
 
+import pdf2image
+import pytesseract
+import os
+from pathlib import Path
+
+
+
 class RussianIFRSAnalyzer:
     def __init__(self, pdf_path: str, openai_api_key: str):
         self.pdf_path = pdf_path
@@ -25,15 +32,22 @@ class RussianIFRSAnalyzer:
         self.extracted_figures = {}
 
     def extract_pdf_text(self) -> List[str]:
-        """Extract text from PDF, maintaining page-level separation."""
-        with pdfplumber.open(self.pdf_path) as pdf:
-            self.pages_text = [page.extract_text() for page in pdf.pages]
+        """Extract text from PDF using OCR."""
+        # Convert PDF to images
+        images = pdf2image.convert_from_path(self.pdf_path)
+        
+        # Process each page with OCR
+        for image in images:
+            text = pytesseract.image_to_string(image, lang='rus')
+            self.pages_text.append(text)
+        
         return self.pages_text
+
 
     def create_vector_store(self):
         """Create FAISS vector store from PDF content."""
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
+            chunk_size=10000,
             chunk_overlap=100
         )
         
