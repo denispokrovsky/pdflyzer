@@ -35,12 +35,16 @@ class RussianIFRSAnalyzer:
         images = pdf2image.convert_from_path(self.pdf_path)
         
         # Process each page with OCR
-        for image in images:
-            text = pytesseract.image_to_string(image, lang='rus')
-            self.pages_text.append(text)
-        
-        return self.pages_text
+        try: 
 
+            for image in images:
+                text = pytesseract.image_to_string(image, lang='rus')
+                self.pages_text.append(text)
+        
+            return self.pages_text
+        
+        except Exception as e:
+            st.error(f"Error during OCR: {str(e)}")
 
     def create_vector_store(self):
         """Create FAISS vector store from PDF content."""
