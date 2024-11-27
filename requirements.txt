@@ -8,3 +8,4 @@ pdf2image
 pytesseract
 plotly
 langchain-community
+langchain-text-splitters
