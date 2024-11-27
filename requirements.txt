@@ -10,3 +10,4 @@ plotly
 langchain-community
 langchain-text-splitters
 langchain-core
+langchain-openai
