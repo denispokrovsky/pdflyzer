@@ -104,7 +104,7 @@ def main():
 
             with col2:
                 # Download button for results
-                csv = formatted_df.to_csv(index=False).encode('utf-8')
+                csv = results_df.to_csv(index=False).encode('utf-8')
                 st.download_button(
                     label="Download Results CSV",
                     data=csv,
