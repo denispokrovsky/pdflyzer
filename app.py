@@ -4,6 +4,7 @@ from russian_ifrs_analyzer import RussianIFRSAnalyzer
 import tempfile
 import plotly.graph_objects as go
 
+
 st.set_page_config(
     page_title="Russian IFRS Analyzer",
     page_icon="📊",
@@ -28,7 +29,7 @@ def create_comparison_chart(df: pd.DataFrame) -> go.Figure:
     return fig
 
 def main():
-    st.title("🎯 R. IFRS Statement Analyzer v.1.2")
+    st.title("🎯 R. IFRS Statement Analyzer v.1.3")
     
     st.markdown("""
     This app analyzes Russian IFRS financial statements and extracts key financial metrics.
