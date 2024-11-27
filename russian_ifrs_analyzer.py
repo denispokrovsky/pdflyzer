@@ -32,7 +32,7 @@ class RussianIFRSAnalyzer:
     def extract_pdf_text(self) -> List[str]:
         """Extract text from PDF using OCR."""
         # Convert PDF to images
-        images = pdf2image.convert_from_path(self.pdf_path)
+        images = pdf2image.convert_from_path(self.pdf_path, first_page=1, last_page=10)
         
         # Process each page with OCR
         try: 
@@ -42,7 +42,6 @@ class RussianIFRSAnalyzer:
                 self.pages_text.append(text)
         
             return self.pages_text
-        
         except Exception as e:
             st.error(f"Error during OCR: {str(e)}")
 
@@ -87,6 +86,7 @@ class RussianIFRSAnalyzer:
 
         query = metric_queries.get(metric, metric)
         context = self.get_relevant_context(query)
+        # just in case...   escaped_context = context.replace("{", "{{").replace("}", "}}")
 
         prompt = ChatPromptTemplate.from_messages([
             ("system", """You are a financial analyst expert in IFRS statements. 
@@ -99,7 +99,7 @@ class RussianIFRSAnalyzer:
             If number is in thousands, divide by 1000.
             Handle negative values appropriately (numbers in parentheses are negative).
             If you can't find the value, return null."""),
-            ("user", f"Metric to extract: {metric}\n\nContext:\n{context}")
+            ("user", "Metric to extract: {}\n\nContext:\n{}".format(metric, context))
         ])
 
         response = self.llm(prompt.format_messages())
