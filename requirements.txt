@@ -7,3 +7,4 @@ openai
 pdf2image
 pytesseract
 plotly
+langchain_community
