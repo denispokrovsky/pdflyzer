@@ -28,7 +28,7 @@ def create_comparison_chart(df: pd.DataFrame) -> go.Figure:
     return fig
 
 def main():
-    st.title("🎯 Russian IFRS Statement Analyzer")
+    st.title("🎯 R. IFRS Statement Analyzer v.1.2")
     
     st.markdown("""
     This app analyzes Russian IFRS financial statements and extracts key financial metrics.
@@ -64,6 +64,27 @@ def main():
             status_text.text("Extracting text from PDF...")
             
             # Extract text
+            extracted_text = analyzer.extract_pdf_text()
+            
+            # Create a formatted version of the text with page numbers
+            formatted_text = ""
+            for i, page_text in enumerate(extracted_text, 1):
+                formatted_text += f"\n=== Page {i} ===\n{page_text}\n"
+            
+            # Download buttons side by side
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Download button for extracted text
+                st.download_button(
+                    label="Download Extracted Text",
+                    data=formatted_text.encode('utf-8'),
+                    file_name="extracted_text.txt",
+                    mime="text/plain",
+                )
+
+
+            # Extract text
             analyzer.extract_pdf_text()
             progress_bar.progress(60)
             status_text.text("Creating vector store...")
@@ -80,6 +101,17 @@ def main():
             progress_bar.progress(100)
             status_text.text("Analysis complete!")
             
+
+            with col2:
+                # Download button for results
+                csv = formatted_df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="Download Results CSV",
+                    data=csv,
+                    file_name="ifrs_analysis_results.csv",
+                    mime="text/csv",
+                )
+
             # Display results in tabs
             tab1, tab2, tab3 = st.tabs(["📊 Results Table", "📈 Visualization", "📋 Key Ratios"])
             
@@ -103,28 +135,8 @@ def main():
                     use_container_width=True
                 )
                 
-                # Add download button
-                csv = formatted_df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="Download results as CSV",
-                    data=csv,
-                    file_name="ifrs_analysis_results.csv",
-                    mime="text/csv",
-                )
                 
-                extracted_text = analyzer.extract_pdf_text()
-                formatted_text = ""
-                for i, page_text in enumerate(extracted_text, 1):
-                    formatted_text += f"\n=== Page {i} ===\n{page_text}\n"
-
-
-                # Add second download button
-                st.download_button(
-                    label="Download Extracted Text",
-                    data=formatted_text.encode('utf-8'),
-                    file_name="extracted_text.txt",
-                    mime="text/plain",
-                )
+                
 
             with tab2:
                 st.subheader("Visual Comparison")
