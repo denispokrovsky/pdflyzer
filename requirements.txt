@@ -1,11 +1,9 @@
 streamlit
-pdfplumber==0.10.3
-langchain==0.1.0
+pandas
+pdfplumber
+langchain
 faiss-cpu
-openai==1.12.0
-pandas==2.1.4
-plotly==5.18.0
-python-dotenv==1.0.0
-tiktoken
+openai
 pdf2image
 pytesseract
+plotly
