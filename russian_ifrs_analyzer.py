@@ -86,7 +86,7 @@ class RussianIFRSAnalyzer:
 
         query = metric_queries.get(metric, metric)
         context = self.get_relevant_context(query)
-        # just in case...   escaped_context = context.replace("{", "{{").replace("}", "}}")
+        escaped_context = context.replace("{", "{{").replace("}", "}}")
 
         prompt = ChatPromptTemplate.from_messages([
             ("system", """You are a financial analyst expert in IFRS statements. 
@@ -99,7 +99,7 @@ class RussianIFRSAnalyzer:
             If number is in thousands, divide by 1000.
             Handle negative values appropriately (numbers in parentheses are negative).
             If you can't find the value, return null."""),
-            ("user", "Metric to extract: {}\n\nContext:\n{}".format(metric, context))
+            ("user", f"Metric to extract: {metric}\n\nContext:\n{escaped_context}")
         ])
 
         response = self.llm(prompt.format_messages())
