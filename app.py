@@ -111,7 +111,21 @@ def main():
                     file_name="ifrs_analysis_results.csv",
                     mime="text/csv",
                 )
-            
+                
+                extracted_text = analyzer.extract_pdf_text()
+                formatted_text = ""
+                for i, page_text in enumerate(extracted_text, 1):
+                    formatted_text += f"\n=== Page {i} ===\n{page_text}\n"
+
+
+                # Add second download button
+                st.download_button(
+                    label="Download Extracted Text",
+                    data=formatted_text.encode('utf-8'),
+                    file_name="extracted_text.txt",
+                    mime="text/plain",
+                )
+
             with tab2:
                 st.subheader("Visual Comparison")
                 # Create and display comparison chart
