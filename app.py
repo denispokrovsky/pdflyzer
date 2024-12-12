@@ -37,7 +37,7 @@ def create_comparison_chart(df: pd.DataFrame, metric: str) -> go.Figure:
     return fig
 
 def main():
-    st.title("🎯 R. IFRS Statement Analyzer v.2.23")
+    st.title("🎯 R. IFRS Statement Analyzer v.2.24")
     
     st.markdown("""
     This app analyzes Russian IFRS financial statements and extracts key financial metrics.
