@@ -3,7 +3,8 @@ import pandas as pd
 import plotly.graph_objects as go
 from russian_ifrs_analyzer import RussianIFRSAnalyzer
 import tempfile
-import io 
+import io
+import sys 
 
 st.set_page_config(
     page_title="Russian IFRS Analyzer v.2.0",
