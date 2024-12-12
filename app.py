@@ -103,7 +103,7 @@ def calculate_ratios(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(ratios)
 
 def main():
-    st.title("🎯 R. IFRS Statement Analyzer v.2.33")
+    st.title("🎯 R. IFRS Statement Analyzer v.2.34")
     
     st.markdown("""
     This app analyzes Russian IFRS financial statements and extracts key financial metrics.

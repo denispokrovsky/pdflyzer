@@ -46,6 +46,7 @@ class RussianIFRSAnalyzer:
         self.last_request_time = time.time()
         self.min_request_interval = 1.25
         
+        
         # Map metrics to their statements
         self.metric_locations = {
             'total_assets': 'balance_sheet',
@@ -60,6 +61,62 @@ class RussianIFRSAnalyzer:
             'capex': 'cash_flow',
             'dividends': 'cash_flow'
         }
+        
+        # Map metrics to their likely page identifiers
+        self.metric_identifiers = {
+            'total_assets': ['отчет о финансовом положении', 'бухгалтерский баланс', 'активы', 'итого активы'],
+            'total_equity': ['отчет о финансовом положении', 'бухгалтерский баланс', 'капитал', 'итого капитал'],
+            'total_debt': ['отчет о финансовом положении', 'бухгалтерский баланс', 'заемные средства', 'кредиты'],
+            'cash': ['отчет о финансовом положении', 'бухгалтерский баланс', 'денежные средства'],
+            'revenue': ['отчет о прибыли', 'прибылях и убытках', 'выручка'],
+            'operating_profit': ['отчет о прибыли', 'прибылях и убытках', 'операционная прибыль'],
+            'net_profit': ['отчет о прибыли', 'прибылях и убытках', 'чистая прибыль', 'прибыль за период'],
+            'ebitda': ['отчет о прибыли', 'прибылях и убытках', 'ebitda', 'прибыль до вычета'],
+            'interest_expense': ['отчет о прибыли', 'прибылях и убытках', 'процентные расходы'],
+            'capex': ['отчет о движении денежных средств', 'приобретение основных средств'],
+            'dividends': ['отчет о движении денежных средств', 'дивиденды']
+        }
+        
+        self.pages_text = []
+        self.page_dates = {}  # Store dates found on each page
+
+    def find_metric_page(self, metric: str) -> int:
+        """Find the most relevant page for a given metric."""
+        identifiers = self.metric_identifiers[metric]
+        
+        best_page = None
+        max_matches = 0
+        
+        for page_num, text in enumerate(self.pages_text):
+            matches = sum(1 for identifier in identifiers if identifier.lower() in text.lower())
+            if matches > max_matches:
+                max_matches = matches
+                best_page = page_num
+        
+        print(f"\nDebug - For metric '{metric}' found best page: {best_page + 1 if best_page is not None else None}")
+        return best_page
+    
+    def extract_date_from_page(self, text: str) -> Optional[str]:
+        """Extract date from page text."""
+        # Common date patterns in Russian financial statements
+        patterns = [
+            r'на .*?(\d{1,2})\.(\d{1,2})\.(\d{4})',
+            r'за .*?год.*?(\d{4})',
+            r'за .*?(\d{1,2})\.(\d{1,2})\.(\d{4})',
+            r'период.*?(\d{4})'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                groups = match.groups()
+                if len(groups) == 3:  # Full date
+                    return f"{groups[2]}-{groups[1]}-{groups[0]}"
+                elif len(groups) == 1:  # Year only
+                    return f"{groups[0]}-12-31"
+        
+        return None
+    
 
     def _wait_for_rate_limit(self):
         """Ensure minimum time between requests."""
@@ -153,43 +210,42 @@ class RussianIFRSAnalyzer:
                     print(f"Debug - Date: {self.statement_dates.get(statement_type)}")
 
     def extract_figure_with_llm(self, metric: str) -> Dict[str, Optional[float]]:
-        """Extract specific financial metric using LLM with statement context."""
+        """Extract specific financial metric using LLM with page context."""
         print(f"\nDebug - Processing metric: {metric}")
         
-        # Get the appropriate statement context
-        statement_type = self.metric_locations.get(metric)
-        if not statement_type or not self.statements.get(statement_type):
-            print(f"Debug - Could not find appropriate statement for {metric}")
+        # Find the most relevant page
+        page_num = self.find_metric_page(metric)
+        if page_num is None:
+            print(f"Debug - Could not find relevant page for {metric}")
             return {'reported': {'value': None, 'date': None},
                    'comparative': {'value': None, 'date': None}}
 
-        # Get the statement context
-        context = self.statements[statement_type]
-        statement_date = self.statement_dates.get(statement_type)
+        # Get page context
+        context = self.pages_text[page_num]
+        page_date = self.page_dates.get(page_num)
         
-        print(f"\nDebug - Using {statement_type} statement context for {metric}")
-        print(f"Debug - Statement date: {statement_date}")
+        print(f"\nDebug - Using page {page_num + 1} for {metric}")
+        print(f"Debug - Page date: {page_date}")
         print(f"Debug - Context excerpt: {context[:500]}...")
 
         self._wait_for_rate_limit()
 
         prompt = ChatPromptTemplate.from_messages([
             ("system", """You are a financial analyst expert in IFRS statements.
-            Extract the numerical value for the specified metric from the given financial statement.
+            Extract the numerical value for the specified metric from the given page of a financial statement.
             The text is in Russian. Return ONLY a JSON with two keys:
             'reported': {'value': float or null, 'date': 'YYYY-MM-DD'},
             'comparative': {'value': float or null, 'date': 'YYYY-MM-DD'}
             
             Important rules:
-            - The statement date is provided - use it for the 'date' field
-            - Look for the exact metric, not similar ones
             - Numbers are in millions of rubles
             - Convert any billions to millions (multiply by 1000)
-            - Handle negative values (numbers in parentheses)
-            - If exact value isn't found, return null"""),
+            - Handle negative values (numbers in parentheses are negative)
+            - Only extract the exact metric requested
+            - If value isn't found, return null
+            - Pay attention to the column headers to determine which values are current vs comparative"""),
             ("user", f"""Metric to extract: {metric}
-Statement type: {statement_type}
-Statement date: {statement_date}
+Page date: {page_date}
 
 Context:
 {context}""")
@@ -206,14 +262,17 @@ Context:
             }
 
     def analyze_statements(self) -> pd.DataFrame:
-        """Analyze IFRS statements with statement-based context."""
+        """Analyze IFRS statements with page-based context."""
         try:
             print("\nDebug - Starting analysis")
             self.extract_pdf_text()
             
-            # First identify and extract the statements
-            print("\nDebug - Identifying financial statements")
-            self.identify_statements()
+            # Extract dates from each page
+            for page_num, text in enumerate(self.pages_text):
+                date = self.extract_date_from_page(text)
+                if date:
+                    self.page_dates[page_num] = date
+                    print(f"\nDebug - Found date on page {page_num + 1}: {date}")
             
             metrics = [
                 'total_debt', 'revenue', 'interest_expense', 'total_equity',
