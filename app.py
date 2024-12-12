@@ -10,29 +10,43 @@ st.set_page_config(
     layout="wide"
 )
 
+def format_date(date):
+    """Safely format date string, returning 'N/A' for None values."""
+    if pd.isna(date) or date is None:
+        return 'N/A'
+    try:
+        return pd.to_datetime(date).strftime('%Y-%m-%d')
+    except:
+        return 'N/A'
+
 def create_comparison_chart(df: pd.DataFrame, metric: str) -> go.Figure:
     """Create a comparison chart comparing reported and comparative values."""
     fig = go.Figure()
     
-    metric_date = df[df['Metric'] == metric]['Date'].iloc[0]
-    comp_date = df[df['Metric'] == metric]['Comparative Date'].iloc[0]
-    
-    # Add bars for reported and comparative values
     values = df[df['Metric'] == metric]
-    fig.add_trace(go.Bar(
-        name=f'Reported ({metric_date})',
-        x=[metric],
-        y=[values['Value'].iloc[0]],
-        text=[f'{values["Value"].iloc[0]:,.0f}M'],
-        textposition='auto',
-    ))
+    if values.empty:
+        return fig
+        
+    metric_date = format_date(values['Date'].iloc[0])
+    comp_date = format_date(values['Comparative Date'].iloc[0])
     
-    if pd.notna(comp_date):  # Only add comparative if it exists
+    value = values['Value'].iloc[0]
+    if pd.notna(value):
+        fig.add_trace(go.Bar(
+            name=f'Reported ({metric_date})',
+            x=[metric],
+            y=[value],
+            text=[f'{value:,.0f}M'] if isinstance(value, (int, float)) else ['N/A'],
+            textposition='auto',
+        ))
+    
+    comp_value = values['Comparative Value'].iloc[0]
+    if pd.notna(comp_value) and comp_date != 'N/A':
         fig.add_trace(go.Bar(
             name=f'Comparative ({comp_date})',
             x=[metric],
-            y=[values['Comparative Value'].iloc[0]],
-            text=[f'{values["Comparative Value"].iloc[0]:,.0f}M'],
+            y=[comp_value],
+            text=[f'{comp_value:,.0f}M'] if isinstance(comp_value, (int, float)) else ['N/A'],
             textposition='auto',
         ))
     
@@ -50,32 +64,35 @@ def calculate_ratios(df: pd.DataFrame) -> pd.DataFrame:
     ratios = []
     
     # Get the main reporting date
-    report_date = df['Date'].iloc[0]
+    report_date = df['Date'].iloc[0] if not df.empty else None
     
     # Get values for ratio calculations
     values = df.set_index('Metric')['Value']
     
     # Calculate ratios where possible
-    if 'total_assets' in values and 'net_profit' in values and values['total_assets'] != 0:
-        ratios.append({
-            'Ratio': 'ROA',
-            'Value': values['net_profit'] / values['total_assets'],
-            'Date': report_date
-        })
+    if 'total_assets' in values and 'net_profit' in values:
+        if pd.notna(values['total_assets']) and values['total_assets'] != 0 and pd.notna(values['net_profit']):
+            ratios.append({
+                'Ratio': 'ROA',
+                'Value': values['net_profit'] / values['total_assets'],
+                'Date': report_date
+            })
     
-    if 'total_equity' in values and 'net_profit' in values and values['total_equity'] != 0:
-        ratios.append({
-            'Ratio': 'ROE',
-            'Value': values['net_profit'] / values['total_equity'],
-            'Date': report_date
-        })
+    if 'total_equity' in values and 'net_profit' in values:
+        if pd.notna(values['total_equity']) and values['total_equity'] != 0 and pd.notna(values['net_profit']):
+            ratios.append({
+                'Ratio': 'ROE',
+                'Value': values['net_profit'] / values['total_equity'],
+                'Date': report_date
+            })
     
-    if 'total_debt' in values and 'ebitda' in values and values['ebitda'] != 0:
-        ratios.append({
-            'Ratio': 'Debt/EBITDA',
-            'Value': values['total_debt'] / values['ebitda'],
-            'Date': report_date
-        })
+    if 'total_debt' in values and 'ebitda' in values:
+        if pd.notna(values['ebitda']) and values['ebitda'] != 0 and pd.notna(values['total_debt']):
+            ratios.append({
+                'Ratio': 'Debt/EBITDA',
+                'Value': values['total_debt'] / values['ebitda'],
+                'Date': report_date
+            })
     
     return pd.DataFrame(ratios)
 
@@ -121,9 +138,9 @@ def main():
             formatted_df['Value'] = formatted_df['Value'].apply(RussianIFRSAnalyzer.format_value)
             formatted_df['Comparative Value'] = formatted_df['Comparative Value'].apply(RussianIFRSAnalyzer.format_value)
             
-            # Format dates for display
-            formatted_df['Date'] = pd.to_datetime(formatted_df['Date']).dt.strftime('%Y-%m-%d')
-            formatted_df['Comparative Date'] = pd.to_datetime(formatted_df['Comparative Date']).dt.strftime('%Y-%m-%d')
+            # Format dates safely
+            formatted_df['Date'] = formatted_df['Date'].apply(format_date)
+            formatted_df['Comparative Date'] = formatted_df['Comparative Date'].apply(format_date)
             
             # Display results in tabs
             tab1, tab2, tab3 = st.tabs(["📊 Results", "📈 Visualizations", "📋 Key Ratios"])
@@ -158,6 +175,7 @@ def main():
                     # Format ratio values for display
                     formatted_ratios = ratios_df.copy()
                     formatted_ratios['Value'] = formatted_ratios['Value'].apply(lambda x: f"{x:.2f}x")
+                    formatted_ratios['Date'] = formatted_ratios['Date'].apply(format_date)
                     st.dataframe(formatted_ratios, use_container_width=True)
                 else:
                     st.write("Unable to calculate ratios due to missing or invalid data")
