@@ -257,32 +257,30 @@ class RussianIFRSAnalyzer:
         print(f"Debug - Date info: {date_info}")
         return best_page, date_info
 
-    def extract_date_with_llm(self, page_text: str) -> Dict[str, Optional[str]]:
+def extract_date_with_llm(self, page_text: str) -> Dict[str, Optional[str]]:
         """Extract reporting dates from page text using LLM."""
         print("\nDebug - Extracting dates with LLM")
         
         prompt = ChatPromptTemplate.from_messages([
-            ("system", """Extract the reporting date from Russian IFRS statement page.
-            Return simple JSON in exactly this format (no extra spaces or newlines):
-            {"statement_date":"YYYY-MM-DD","period_type":"12M","period_description":"text","is_comparative":false}
-            
-            Rules:
-            - For "на 31 декабря 2023" use "2023-12-31"
-            - For "за год" use "12M" as period_type
-            - For "за 6 месяцев" use "6M" as period_type
-            - Set is_comparative to true if page shows two periods
-            - If date not found, use null"""),
-            ("user", f"Extract date from:\n{page_text[:500]}")
+            ("system", """You are extracting dates from Russian IFRS statements.
+            Return EXACTLY this JSON format (copy exactly, only change values):
+            {"statement_date":"2023-12-31","period_type":"12M","period_description":"Year ended 31 December 2023","is_comparative":false}
+
+            Common Russian date patterns:
+            - "по состоянию на 31 декабря 2023" → "2023-12-31"
+            - "на 31 декабря 2023 года" → "2023-12-31"
+            - "за 2023 год" → period_type "12M"
+            - "за год, закончившийся 31 декабря 2023" → "2023-12-31" and "12M"
+
+            Use null for missing values but keep the exact JSON structure."""),
+            ("user", f"Extract dates from this statement page:\n{page_text[:500]}")
         ])
 
         try:
-            self._wait_for_rate_limit()
             response = self.llm(prompt.format_messages())
-            # Print raw response for debugging
-            print(f"\nDebug - Raw date response:")
-            print(response.content)
-            result = self._parse_llm_response(response.content, "date_extraction")
-            print(f"\nDebug - Parsed date result: {result}")
+            print(f"\nDebug - Date extraction raw response: {response.content}")
+            result = json.loads(response.content.strip())
+            print(f"\nDebug - Date extraction parsed result: {result}")
             return result
         except Exception as e:
             print(f"\nDebug - Error extracting dates: {str(e)}")
@@ -303,58 +301,32 @@ class RussianIFRSAnalyzer:
 
         context = self.pages_text[page_num]
         
-        print(f"\nDebug - Using page {page_num + 1} for {metric}")
-        print(f"Debug - Date info: {date_info}")
-        print(f"Debug - Context excerpt: {context[:500]}...")
-
-        self._wait_for_rate_limit()
-
         prompt = ChatPromptTemplate.from_messages([
-            ("system", """Extract the numeric value for the specified metric from Russian IFRS statement.
-            Return simple JSON in exactly this format (no extra spaces or newlines):
-            {"reported":{"value":123.45,"date":"2023-12-31"},"comparative":{"value":null,"date":null}}
-            
-            Rules:
-            1. Numbers:
-               - Values in millions (млн руб.)
-               - "60 904" means 60904.0
-               - "(4 041)" means -4041.0
-               - "Прим. 16" - ignore note numbers
-               - Join numbers split across lines
-            
-            2. Statement types:
-               - Balance sheet: use line item totals
-               - Income statement: use correct profit level
-               - Cash flow: distinguish between positive/negative flows
-            
-            If value not found, use null."""),
-            ("user", f"""Find this exact metric: {metric}
-In this context (pay attention to whether it shows comparative figures):
+            ("system", """You are extracting financial metrics from Russian IFRS statements.
+            Return EXACTLY this JSON format (copy exactly, only change values):
+            {"reported":{"value":60904.0,"date":"2023-12-31"},"comparative":{"value":null,"date":null}}
 
+            Number format rules:
+            - "60 904" → 60904.0
+            - "(4 041)" → -4041.0
+            - Numbers are in millions (млн руб.)
+            - Ignore "Прим." or note numbers
+            
+            Real examples:
+            - "Основные средства 16 60 904" → 60904.0
+            - "Добавочный капитал (4 041)" → -4041.0
+            
+            Always keep the exact JSON structure, just change the values."""),
+            ("user", f"""Find this exact metric: {metric}
+Current context:
 {context}""")
         ])
 
         try:
             response = self.llm(prompt.format_messages())
-            # Print raw response for debugging
-            print(f"\nDebug - Raw metric response:")
-            print(response.content)
-            result = self._parse_llm_response(response.content, metric)
-            print(f"\nDebug - Parsed metric result: {result}")
-            
-            # Use date info if available
-            if date_info and date_info.get('statement_date'):
-                if 'reported' in result:
-                    result['reported']['date'] = date_info['statement_date']
-                
-                if 'comparative' in result and result['comparative'].get('value') is not None:
-                    try:
-                        current_date = datetime.strptime(date_info['statement_date'], '%Y-%m-%d')
-                        comparative_date = current_date.replace(year=current_date.year - 1)
-                        result['comparative']['date'] = comparative_date.strftime('%Y-%m-%d')
-                    except:
-                        pass
-            
+            print(f"\nDebug - Metric extraction raw response: {response.content}")
+            result = json.loads(response.content.strip())
+            print(f"\nDebug - Metric extraction parsed result: {result}")
             return result
         except Exception as e:
             print(f"Debug - Error in LLM extraction for {metric}: {str(e)}")
