@@ -257,7 +257,7 @@ class RussianIFRSAnalyzer:
         print(f"Debug - Date info: {date_info}")
         return best_page, date_info
 
-def extract_date_with_llm(self, page_text: str) -> Dict[str, Optional[str]]:
+    def extract_date_with_llm(self, page_text: str) -> Dict[str, Optional[str]]:
         """Extract reporting dates from page text using LLM."""
         print("\nDebug - Extracting dates with LLM")
         
