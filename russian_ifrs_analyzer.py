@@ -6,7 +6,6 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain.schema import Document
 import pandas as pd
-from typing import List, Dict, Optional, Any
 from tenacity import retry, stop_after_attempt, wait_exponential
 import openai
 import time
@@ -15,6 +14,8 @@ import pytesseract
 import os
 from datetime import datetime
 import re
+from typing import List, Dict, Optional, Any, Tuple
+
 
 class RussianIFRSAnalyzer:
     def __init__(self, pdf_path: str, openai_api_key: str, max_retries: int = 5):
