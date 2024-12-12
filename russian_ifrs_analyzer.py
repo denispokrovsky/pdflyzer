@@ -79,43 +79,6 @@ class RussianIFRSAnalyzer:
         
         self.pages_text = []
         self.page_dates = {}  # Store dates found on each page
-
-    def find_metric_page(self, metric: str) -> int:
-        """Find the most relevant page for a given metric."""
-        identifiers = self.metric_identifiers[metric]
-        
-        best_page = None
-        max_matches = 0
-        
-        for page_num, text in enumerate(self.pages_text):
-            matches = sum(1 for identifier in identifiers if identifier.lower() in text.lower())
-            if matches > max_matches:
-                max_matches = matches
-                best_page = page_num
-        
-        print(f"\nDebug - For metric '{metric}' found best page: {best_page + 1 if best_page is not None else None}")
-        return best_page
-    
-    def extract_date_from_page(self, text: str) -> Optional[str]:
-        """Extract date from page text."""
-        # Common date patterns in Russian financial statements
-        patterns = [
-            r'на .*?(\d{1,2})\.(\d{1,2})\.(\d{4})',
-            r'за .*?год.*?(\d{4})',
-            r'за .*?(\d{1,2})\.(\d{1,2})\.(\d{4})',
-            r'период.*?(\d{4})'
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, text)
-            if match:
-                groups = match.groups()
-                if len(groups) == 3:  # Full date
-                    return f"{groups[2]}-{groups[1]}-{groups[0]}"
-                elif len(groups) == 1:  # Year only
-                    return f"{groups[0]}-12-31"
-        
-        return None
     
 
     def _wait_for_rate_limit(self):
@@ -209,43 +172,134 @@ class RussianIFRSAnalyzer:
                     print(f"\nDebug - Found {statement_type} on page {page_num + 1}")
                     print(f"Debug - Date: {self.statement_dates.get(statement_type)}")
 
+def extract_date_with_llm(self, page_text: str) -> Dict[str, Optional[str]]:
+        """Extract reporting dates from page text using LLM."""
+        print("\nDebug - Extracting dates with LLM")
+        
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are a financial expert analyzing Russian IFRS statements.
+            Extract the reporting date and period type from the given page.
+            Return ONLY a JSON object with this structure:
+            {
+                "statement_date": "YYYY-MM-DD",  # Main reporting date
+                "period_type": "3M"/"6M"/"9M"/"12M",  # Reporting period
+                "period_description": string,  # Description like "Year ended 31 December 2023"
+                "is_comparative": boolean  # If this page shows comparative figures
+            }
+            
+            Look for:
+            - "на [date]" for balance sheet dates
+            - "за [period] [year]" for income statement periods
+            - Standard dates like "31 декабря 2023"
+            - Period indicators like "за год", "за 6 месяцев"
+            
+            If date/period not found, use null for that field."""),
+            ("user", f"Extract reporting date and period from this page:\n\n{page_text[:1000]}")
+        ])
+
+        try:
+            self._wait_for_rate_limit()
+            response = self.llm(prompt.format_messages())
+            result = self._parse_llm_response(response.content, "date_extraction")
+            print(f"\nDebug - Extracted dates: {result}")
+            return result
+        except Exception as e:
+            print(f"\nDebug - Error extracting dates: {str(e)}")
+            return {
+                "statement_date": None,
+                "period_type": None,
+                "period_description": None,
+                "is_comparative": False
+            }
+
+    def find_metric_page(self, metric: str) -> Tuple[int, Dict[str, Any]]:
+        """Find the most relevant page for a given metric and extract its dates."""
+        identifiers = self.metric_identifiers[metric]
+        
+        best_page = None
+        max_score = 0
+        date_info = None
+        
+        for page_num, text in enumerate(self.pages_text):
+            text_lower = text.lower()
+            
+            # Skip table of contents pages
+            if "содержание" in text_lower and page_num < 3:
+                continue
+                
+            score = 0
+            
+            # Check for statement type indicators first
+            if metric in ['total_assets', 'total_equity', 'cash'] and 'отчет о финансовом положении' in text_lower:
+                score += 10
+            elif metric in ['revenue', 'operating_profit', 'net_profit'] and 'отчет о прибыли' in text_lower:
+                score += 10
+            elif metric in ['capex', 'dividends'] and 'отчет о движении денежных средств' in text_lower:
+                score += 10
+            
+            # Check for specific metric indicators
+            for identifier in identifiers:
+                if identifier.lower() in text_lower:
+                    score += 5
+                    if re.search(rf"{identifier.lower()}.{{0,30}}\d", text_lower):
+                        score += 10
+            
+            if score > max_score:
+                max_score = score
+                best_page = page_num
+                # Extract dates from the best matching page
+                if score > 0:
+                    date_info = self.extract_date_with_llm(text)
+        
+        print(f"\nDebug - For metric '{metric}' found best page: {best_page + 1 if best_page is not None else None} with score {max_score}")
+        print(f"Debug - Date info: {date_info}")
+        return best_page, date_info
+
     def extract_figure_with_llm(self, metric: str) -> Dict[str, Optional[float]]:
-        """Extract specific financial metric using LLM with page context."""
+        """Extract specific financial metric using LLM with date context."""
         print(f"\nDebug - Processing metric: {metric}")
         
-        # Find the most relevant page
-        page_num = self.find_metric_page(metric)
+        page_num, date_info = self.find_metric_page(metric)
         if page_num is None:
             print(f"Debug - Could not find relevant page for {metric}")
             return {'reported': {'value': None, 'date': None},
                    'comparative': {'value': None, 'date': None}}
 
-        # Get page context
         context = self.pages_text[page_num]
-        page_date = self.page_dates.get(page_num)
         
         print(f"\nDebug - Using page {page_num + 1} for {metric}")
-        print(f"Debug - Page date: {page_date}")
+        print(f"Debug - Date info: {date_info}")
         print(f"Debug - Context excerpt: {context[:500]}...")
 
         self._wait_for_rate_limit()
 
         prompt = ChatPromptTemplate.from_messages([
             ("system", """You are a financial analyst expert in IFRS statements.
-            Extract the numerical value for the specified metric from the given page of a financial statement.
-            The text is in Russian. Return ONLY a JSON with two keys:
-            'reported': {'value': float or null, 'date': 'YYYY-MM-DD'},
-            'comparative': {'value': float or null, 'date': 'YYYY-MM-DD'}
+            Find and extract numerical value for the EXACT specified metric from the given page.
+            The text is in Russian. Return ONLY a JSON object in this format:
+            {
+                "reported": {"value": float, "date": "YYYY-MM-DD"},
+                "comparative": {"value": float, "date": "YYYY-MM-DD"}
+            }
             
-            Important rules:
-            - Numbers are in millions of rubles
-            - Convert any billions to millions (multiply by 1000)
-            - Handle negative values (numbers in parentheses are negative)
-            - Only extract the exact metric requested
-            - If value isn't found, return null
-            - Pay attention to the column headers to determine which values are current vs comparative"""),
+            Rules:
+            1. Numbers are in millions of rubles (млн руб.)
+            2. If you see a number like 60 904, it means 60,904 million rubles
+            3. Numbers in parentheses (123) are negative values
+            4. Look for EXACT metric match, not similar ones
+            5. If value isn't clearly stated, use null
+            6. For values with 'Прим.' or 'Note', use the actual value, not the note number
+            7. Use provided statement_date for the reporting period"""),
             ("user", f"""Metric to extract: {metric}
-Page date: {page_date}
+Statement date: {date_info.get('statement_date') if date_info else None}
+Period type: {date_info.get('period_type') if date_info else None}
+Period description: {date_info.get('period_description') if date_info else None}
+Has comparative figures: {date_info.get('is_comparative') if date_info else False}
+
+Look for exactly this value in the financial statement page.
+For balance sheet items, look for direct line items.
+For income statement items, look for the specific profit/revenue line.
+For cash flow items, look in the cash flow section.
 
 Context:
 {context}""")
@@ -253,7 +307,23 @@ Context:
 
         try:
             response = self.llm(prompt.format_messages())
-            return self._parse_llm_response(response.content, metric)
+            result = self._parse_llm_response(response.content, metric)
+            
+            # Use date info if available
+            if date_info and date_info.get('statement_date'):
+                if 'reported' in result:
+                    result['reported']['date'] = date_info['statement_date']
+                
+                # For comparative date, use previous year with same period end
+                if 'comparative' in result and result['comparative'].get('value') is not None:
+                    try:
+                        current_date = datetime.strptime(date_info['statement_date'], '%Y-%m-%d')
+                        comparative_date = current_date.replace(year=current_date.year - 1)
+                        result['comparative']['date'] = comparative_date.strftime('%Y-%m-%d')
+                    except:
+                        pass
+            
+            return result
         except Exception as e:
             print(f"Debug - Error in LLM extraction for {metric}: {str(e)}")
             return {
