@@ -37,7 +37,7 @@ def create_comparison_chart(df: pd.DataFrame, metric: str) -> go.Figure:
     return fig
 
 def main():
-    st.title("🎯 R. IFRS Statement Analyzer v.2.22")
+    st.title("🎯 R. IFRS Statement Analyzer v.2.23")
     
     st.markdown("""
     This app analyzes Russian IFRS financial statements and extracts key financial metrics.
@@ -69,22 +69,16 @@ def main():
 
             # Format results for display
             formatted_df = results_df.copy()
-            formatted_df['Reported Value'] = formatted_df['Reported Value'].apply(RussianIFRSAnalyzer.format_value)
+            formatted_df['Value'] = formatted_df['Value'].apply(RussianIFRSAnalyzer.format_value)
             formatted_df['Comparative Value'] = formatted_df['Comparative Value'].apply(RussianIFRSAnalyzer.format_value)
+
+            # Format dates for display
+            formatted_df['Date'] = pd.to_datetime(formatted_df['Date']).dt.strftime('%Y-%m-%d')
+            formatted_df['Comparative Date'] = pd.to_datetime(formatted_df['Comparative Date']).dt.strftime('%Y-%m-%d')
 
             # Display in Streamlit
             st.dataframe(formatted_df, use_container_width=True)
 
-
-            # Format results for display
-            #formatted_df = results_df.copy()
-            #formatted_df['Value'] = formatted_df['Value'].apply(RussianIFRSAnalyzer.format_value)
-
-            # Display in Streamlit
-            st.dataframe(
-                formatted_df.sort_values(['Date', 'Metric']),
-                use_container_width=True
-)
 
             #extracted_text = analyzer.extract_pdf_text()
             
