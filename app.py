@@ -37,7 +37,7 @@ def create_comparison_chart(df: pd.DataFrame, metric: str) -> go.Figure:
     return fig
 
 def main():
-    st.title("🎯 R. IFRS Statement Analyzer v2.0")
+    st.title("🎯 R. IFRS Statement Analyzer v.2.1")
     
     st.markdown("""
     This app analyzes Russian IFRS financial statements and extracts key financial metrics.
@@ -64,13 +64,20 @@ def main():
                 pdf_path=tmp_file_path,
                 openai_api_key=st.secrets["openai_api_key"]
             )
+            
+            results_df = analyzer.analyze_statements()
 
-            extracted_text = analyzer.extract_pdf_text()
+            # Format results for display
+            formatted_df = results_df.copy()
+            formatted_df['Value'] = formatted_df['Value'].apply(RussianIFRSAnalyzer.format_value)
+
+
+            #extracted_text = analyzer.extract_pdf_text()
             
             # Create a formatted version of the text with page numbers
-            formatted_text = ""
-            for i, page_text in enumerate(extracted_text, 1):
-                formatted_text += f"\n=== Page {i} ===\n{page_text}\n"
+            #formatted_text = ""
+            #for i, page_text in enumerate(extracted_text, 1):
+            #    formatted_text += f"\n=== Page {i} ===\n{page_text}\n"
 
 
             progress_bar.progress(40)

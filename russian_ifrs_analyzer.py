@@ -6,13 +6,10 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain.schema import Document
 import pandas as pd
 from typing import List, Dict, Optional
-import os
-
 import pdf2image
 import pytesseract
 from pathlib import Path
-
-
+import os
 
 class RussianIFRSAnalyzer:
     def __init__(self, pdf_path: str, openai_api_key: str):
@@ -24,26 +21,20 @@ class RussianIFRSAnalyzer:
         self.llm = ChatOpenAI(temperature=0, model="gpt-4")
         self.embeddings = OpenAIEmbeddings()
         
-        # Initialize storage for extracted content
+        # Initialize storage
         self.pages_text = []
         self.vector_store = None
         self.extracted_figures = {}
 
     def extract_pdf_text(self) -> List[str]:
         """Extract text from PDF using OCR."""
-        # Convert PDF to images
         images = pdf2image.convert_from_path(self.pdf_path, first_page=1, last_page=10)
         
-        # Process each page with OCR
-        try: 
-
-            for image in images:
-                text = pytesseract.image_to_string(image, lang='rus')
-                self.pages_text.append(text)
+        for image in images:
+            text = pytesseract.image_to_string(image, lang='rus')
+            self.pages_text.append(text)
         
-            return self.pages_text
-        except Exception as e:
-            st.error(f"Error during OCR: {str(e)}")
+        return self.pages_text
 
     def create_vector_store(self):
         """Create FAISS vector store from PDF content."""
@@ -73,33 +64,40 @@ class RussianIFRSAnalyzer:
         """Extract specific financial metric using LLM."""
         # Prepare search queries in Russian
         metric_queries = {
-            'total_debt': 'общий долг OR общая задолженность OR кредиты и займы',
-            'revenue': 'выручка OR доходы от реализации',
-            'interest_expense': 'процентные расходы OR финансовые расходы',
-            'total_equity': 'собственный капитал OR капитал и резервы',
-            'total_assets': 'всего активов OR итого активы',
-            'capex': 'капитальные затраты OR инвестиции в основные средства',
+            'total_debt': 'долгосрочные заемные средства AND краткосрочные заемные средства',
+            'revenue': 'выручка от реализации OR доходы от реализации',
+            'interest_expense': 'процентные расходы OR расходы в виде процентов',
+            'total_equity': 'собственный капитал OR итого капитал',
+            'total_assets': 'итого активы',
+            'capex': 'капитальные затраты OR приобретение основных средств',
             'dividends': 'дивиденды выплаченные',
-            'operating_profit': 'операционная прибыль',
-            'ebitda': 'EBITDA OR прибыль до вычета',
+            'operating_profit': 'прибыль от операционной деятельности',
+            'ebitda': 'EBITDA OR прибыль до вычета процентов налогов и амортизации',
+            'cash': 'денежные средства и их эквиваленты',
+            'net_profit': 'прибыль отчетного периода OR чистая прибыль'
         }
 
         query = metric_queries.get(metric, metric)
         context = self.get_relevant_context(query)
-        escaped_context = context.replace("{", "{{").replace("}", "}}")
 
         prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a financial analyst expert in IFRS statements. 
+            ("system", """You are a financial analyst expert in IFRS statements.
             Extract the numerical values for the specified metric from the given context.
             The context is in Russian. Return ONLY a JSON with two keys:
             'current_year': [value as float or null],
             'previous_year': [value as float or null]
             
-            Convert all numbers to millions. If number is in billions, multiply by 1000.
-            If number is in thousands, divide by 1000.
-            Handle negative values appropriately (numbers in parentheses are negative).
-            If you can't find the value, return null."""),
-            ("user", f"Metric to extract: {metric}\n\nContext:\n{escaped_context}")
+            Important:
+            - Convert all numbers to millions
+            - If number is in billions, multiply by 1000
+            - If number is in thousands, divide by 1000
+            - Handle negative values appropriately (numbers in parentheses are negative)
+            - Pay attention to the reporting period and statement type
+            - For balance sheet items, use end-of-period values
+            - For income statement items, use period totals
+            - If you can't find a value or are unsure, return null
+            - Don't make assumptions - if exact figure isn't clear, return null"""),
+            ("user", f"Metric to extract: {metric}\n\nContext:\n{context}")
         ])
 
         response = self.llm(prompt.format_messages())
@@ -111,7 +109,7 @@ class RussianIFRSAnalyzer:
     def calculate_net_debt(self) -> Dict[str, Optional[float]]:
         """Calculate Net Debt from Total Debt and Cash positions."""
         total_debt = self.extracted_figures.get('total_debt', {})
-        cash = self.extract_figure_with_llm('денежные средства и эквиваленты')
+        cash = self.extracted_figures.get('cash', {})
         
         return {
             'current_year': (
@@ -142,7 +140,9 @@ class RussianIFRSAnalyzer:
             'capex',
             'dividends',
             'operating_profit',
-            'ebitda'
+            'ebitda',
+            'cash',
+            'net_profit'
         ]
 
         # Extract each metric
@@ -166,10 +166,11 @@ class RussianIFRSAnalyzer:
 
         return pd.DataFrame(data)
 
-def format_currency(value: Optional[float]) -> str:
-    """Format currency values with millions/billions notation."""
-    if value is None:
-        return "N/A"
-    if abs(value) >= 1000:
-        return f"{value/1000:.2f}B"
-    return f"{value:.2f}M"
+    @staticmethod
+    def format_value(value: Optional[float]) -> str:
+        """Format currency values with millions/billions notation."""
+        if value is None:
+            return "N/A"
+        if abs(value) >= 1000:
+            return f"{value/1000:.2f}B"
+        return f"{value:.2f}M"
