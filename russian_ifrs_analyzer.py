@@ -22,7 +22,7 @@ class RussianIFRSAnalyzer:
         
         self.llm = ChatOpenAI(
             temperature=0,
-            model="gpt-4",
+            model="gpt-4o-mini",
             max_retries=max_retries,
             request_timeout=30
         )
