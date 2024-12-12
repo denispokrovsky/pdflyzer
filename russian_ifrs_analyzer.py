@@ -14,16 +14,37 @@ import pdf2image
 import pytesseract
 import os
 from datetime import datetime
+import re
 
 class RussianIFRSAnalyzer:
     def __init__(self, pdf_path: str, openai_api_key: str, max_retries: int = 5):
-        # [Previous initialization code remains the same]
+        self.pdf_path = pdf_path
+        self.openai_api_key = openai_api_key
+        self.max_retries = max_retries
+        os.environ['OPENAI_API_KEY'] = openai_api_key
+        
+        self.llm = ChatOpenAI(
+            temperature=0,
+            model="gpt-4",
+            max_retries=max_retries,
+            request_timeout=30
+        )
+        
+        self.embeddings = OpenAIEmbeddings(
+            max_retries=max_retries,
+            request_timeout=30
+        )
+        
+        self.pages_text = []
         self.statements = {
             'balance_sheet': None,
             'income_statement': None,
             'cash_flow': None
         }
         self.statement_dates = {}
+        
+        self.last_request_time = time.time()
+        self.min_request_interval = 1.25
         
         # Map metrics to their statements
         self.metric_locations = {
@@ -40,8 +61,66 @@ class RussianIFRSAnalyzer:
             'dividends': 'cash_flow'
         }
 
+    def _wait_for_rate_limit(self):
+        """Ensure minimum time between requests."""
+        elapsed = time.time() - self.last_request_time
+        if elapsed < self.min_request_interval:
+            time.sleep(self.min_request_interval - elapsed)
+        self.last_request_time = time.time()
+
+    def _parse_llm_response(self, response: str, metric: str) -> Dict:
+        """Safely parse LLM response to JSON."""
+        print(f"\nDebug - Raw LLM response for {metric}:")
+        print(response)
+        
+        try:
+            # Clean the response string
+            cleaned_response = response.strip()
+            if cleaned_response.startswith('```') and cleaned_response.endswith('```'):
+                cleaned_response = cleaned_response[3:-3]
+            if cleaned_response.startswith('json'):
+                cleaned_response = cleaned_response[4:]
+            
+            print("\nDebug - Cleaned response:")
+            print(cleaned_response)
+            
+            result = json.loads(cleaned_response)
+            print("\nDebug - Parsed JSON:")
+            print(json.dumps(result, indent=2))
+            
+            return result
+        except json.JSONDecodeError as e:
+            print(f"\nDebug - JSON parse error: {e}")
+            print(f"Failed response was: {response}")
+            return {}
+        except Exception as e:
+            print(f"\nDebug - Error parsing response: {e}")
+            return {}
+
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=4, max=60),
+        reraise=True
+    )
+    def extract_pdf_text(self) -> List[str]:
+        """Extract text from PDF using OCR."""
+        print("\nDebug - Starting PDF text extraction")
+        images = pdf2image.convert_from_path(self.pdf_path, first_page=1, last_page=10)
+        
+        for image in images:
+            text = pytesseract.image_to_string(image, lang='rus')
+            self.pages_text.append(text)
+        
+        print(f"\nDebug - Extracted {len(self.pages_text)} pages")
+        for i, page in enumerate(self.pages_text, 1):
+            print(f"\nPage {i}:")
+            print(page[:500] + "...")  # Print first 500 chars of each page
+        
+        return self.pages_text
+
     def identify_statements(self):
         """Identify and extract full financial statements from the document."""
+        print("\nDebug - Identifying financial statements")
         statement_markers = {
             'balance_sheet': [
                 'отчет о финансовом положении',
@@ -56,7 +135,6 @@ class RussianIFRSAnalyzer:
             ]
         }
         
-        # First, try to identify the pages containing each statement
         for page_num, text in enumerate(self.pages_text):
             for statement_type, markers in statement_markers.items():
                 if any(marker.lower() in text.lower() for marker in markers):
@@ -70,6 +148,9 @@ class RussianIFRSAnalyzer:
                     date_match = re.search(r'на .*?(\d{1,2})\.(\d{1,2})\.(\d{4})', text)
                     if date_match:
                         self.statement_dates[statement_type] = f"{date_match.group(3)}-{date_match.group(2)}-{date_match.group(1)}"
+                    
+                    print(f"\nDebug - Found {statement_type} on page {page_num + 1}")
+                    print(f"Debug - Date: {self.statement_dates.get(statement_type)}")
 
     def extract_figure_with_llm(self, metric: str) -> Dict[str, Optional[float]]:
         """Extract specific financial metric using LLM with statement context."""
@@ -134,14 +215,6 @@ Context:
             print("\nDebug - Identifying financial statements")
             self.identify_statements()
             
-            # Print found statements
-            for statement_type, text in self.statements.items():
-                if text:
-                    print(f"\nDebug - Found {statement_type}")
-                    print(f"Debug - Date: {self.statement_dates.get(statement_type)}")
-                else:
-                    print(f"\nDebug - Could not find {statement_type}")
-
             metrics = [
                 'total_debt', 'revenue', 'interest_expense', 'total_equity',
                 'total_assets', 'capex', 'dividends', 'operating_profit',
@@ -172,3 +245,12 @@ Context:
         except Exception as e:
             print(f"\nDebug - Error in analyze_statements: {str(e)}")
             raise
+
+    @staticmethod
+    def format_value(value: Optional[float]) -> str:
+        """Format currency values with millions/billions notation."""
+        if value is None:
+            return "N/A"
+        if abs(value) >= 1000:
+            return f"{value/1000:.2f}B"
+        return f"{value:.2f}M"
