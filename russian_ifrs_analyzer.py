@@ -437,7 +437,7 @@ Context:
             
             # Extract dates from each page
             for page_num, text in enumerate(self.pages_text):
-                date = self.extract_date_from_page(text)
+                date = self.extract_date_with_llm(text)
                 if date:
                     self.page_dates[page_num] = date
                     print(f"\nDebug - Found date on page {page_num + 1}: {date}")
