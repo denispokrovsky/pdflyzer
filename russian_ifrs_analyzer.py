@@ -6,40 +6,65 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain.schema import Document
 import pandas as pd
 from typing import List, Dict, Optional
+from tenacity import retry, stop_after_attempt, wait_exponential
+import openai
+import time
 import pdf2image
 import pytesseract
-from pathlib import Path
 import os
 
 class RussianIFRSAnalyzer:
-    def __init__(self, pdf_path: str, openai_api_key: str):
+    def __init__(self, pdf_path: str, openai_api_key: str, max_retries: int = 5):
         self.pdf_path = pdf_path
         self.openai_api_key = openai_api_key
+        self.max_retries = max_retries
         os.environ['OPENAI_API_KEY'] = openai_api_key
         
-        # Initialize LLM and embeddings
-        self.llm = ChatOpenAI(temperature=0, model="gpt-4")
-        self.embeddings = OpenAIEmbeddings()
+        self.llm = ChatOpenAI(
+            temperature=0,
+            model="gpt-4",
+            max_retries=max_retries,
+            request_timeout=30
+        )
         
-        # Initialize storage
+        self.embeddings = OpenAIEmbeddings(
+            max_retries=max_retries,
+            request_timeout=30
+        )
+        
         self.pages_text = []
         self.vector_store = None
         self.extracted_figures = {}
-
-    def extract_pdf_text(self) -> List[str]:
-        """Extract text from PDF using OCR."""
-        images = pdf2image.convert_from_path(self.pdf_path, first_page=1, last_page=10)
         
+        self.last_request_time = 0
+        self.min_request_interval = 1.25
+
+    def _wait_for_rate_limit(self):
+        elapsed = time.time() - self.last_request_time
+        if elapsed < self.min_request_interval:
+            time.sleep(self.min_request_interval - elapsed)
+        self.last_request_time = time.time()
+
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=4, max=60),
+        reraise=True
+    )
+    def extract_pdf_text(self) -> List[str]:
+        images = pdf2image.convert_from_path(self.pdf_path, first_page=1, last_page=10)
         for image in images:
             text = pytesseract.image_to_string(image, lang='rus')
             self.pages_text.append(text)
-        
         return self.pages_text
 
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=4, max=60),
+        reraise=True
+    )
     def create_vector_store(self):
-        """Create FAISS vector store from PDF content."""
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=10000,
+            chunk_size=8000,
             chunk_overlap=100
         )
         
@@ -53,122 +78,125 @@ class RussianIFRSAnalyzer:
                 )
                 documents.append(doc)
 
+        self._wait_for_rate_limit()
         self.vector_store = FAISS.from_documents(documents, self.embeddings)
 
-    def get_relevant_context(self, query: str, k: int = 3) -> str:
-        """Retrieve relevant context for a specific financial metric."""
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=4, max=60),
+        reraise=True
+    )
+    def get_relevant_context(self, query: str, k: int = 2) -> str:
+        self._wait_for_rate_limit()
         docs = self.vector_store.similarity_search(query, k=k)
         return "\n".join([doc.page_content for doc in docs])
 
-    def extract_figure_with_llm(self, metric: str) -> Dict[str, Optional[float]]:
-        """Extract specific financial metric using LLM."""
-        # Prepare search queries in Russian
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=4, max=60),
+        reraise=True
+    )
+    def extract_figure_with_llm(self, metric: str) -> Dict[str, Dict[str, Optional[float]]]:
+        """Extract specific financial metric using LLM with rate limiting."""
         metric_queries = {
-            'total_debt': 'долгосрочные заемные средства AND краткосрочные заемные средства',
-            'revenue': 'выручка от реализации OR доходы от реализации',
-            'interest_expense': 'процентные расходы OR расходы в виде процентов',
-            'total_equity': 'собственный капитал OR итого капитал',
+            'total_debt': 'долгосрочные заемные средства',
+            'revenue': 'выручка от реализации',
+            'interest_expense': 'процентные расходы',
+            'total_equity': 'итого капитал',
             'total_assets': 'итого активы',
-            'capex': 'капитальные затраты OR приобретение основных средств',
-            'dividends': 'дивиденды выплаченные',
+            'capex': 'капитальные затраты',
+            'dividends': 'дивиденды',
             'operating_profit': 'прибыль от операционной деятельности',
-            'ebitda': 'EBITDA OR прибыль до вычета процентов налогов и амортизации',
+            'ebitda': 'EBITDA',
             'cash': 'денежные средства и их эквиваленты',
-            'net_profit': 'прибыль отчетного периода OR чистая прибыль'
+            'net_profit': 'прибыль'
         }
 
         query = metric_queries.get(metric, metric)
         context = self.get_relevant_context(query)
 
+        self._wait_for_rate_limit()
+
         prompt = ChatPromptTemplate.from_messages([
             ("system", """You are a financial analyst expert in IFRS statements.
-            Extract the numerical values for the specified metric from the given context.
-            The context is in Russian. Return ONLY a JSON with two keys:
-            'current_year': [value as float or null],
-            'previous_year': [value as float or null]
+            First, identify the periods in the statement (e.g., "31 December 2023", "3 months ended 31 March 2023", etc.).
+            Then extract the numerical values for the specified metric for each period found.
+            
+            Return ONLY a JSON with the following structure:
+            {
+                "periods": [
+                    {
+                        "date": "YYYY-MM-DD",
+                        "period_type": "3M/6M/9M/12M",
+                        "value": float or null
+                    },
+                    ...
+                ]
+            }
             
             Important:
             - Convert all numbers to millions
             - If number is in billions, multiply by 1000
             - If number is in thousands, divide by 1000
             - Handle negative values appropriately (numbers in parentheses are negative)
-            - Pay attention to the reporting period and statement type
-            - For balance sheet items, use end-of-period values
-            - For income statement items, use period totals
-            - If you can't find a value or are unsure, return null
-            - Don't make assumptions - if exact figure isn't clear, return null"""),
+            - If you can't find a value or are unsure for a period, use null
+            - Include all periods mentioned in the document for this metric
+            - For balance sheet items, include the date
+            - For income statement items, include both the period type and end date"""),
             ("user", f"Metric to extract: {metric}\n\nContext:\n{context}")
         ])
 
-        response = self.llm(prompt.format_messages())
         try:
+            response = self.llm(prompt.format_messages())
             return eval(response.content)
-        except:
-            return {'current_year': None, 'previous_year': None}
-
-    def calculate_net_debt(self) -> Dict[str, Optional[float]]:
-        """Calculate Net Debt from Total Debt and Cash positions."""
-        total_debt = self.extracted_figures.get('total_debt', {})
-        cash = self.extracted_figures.get('cash', {})
-        
-        return {
-            'current_year': (
-                total_debt.get('current_year') - cash.get('current_year')
-                if total_debt.get('current_year') is not None and cash.get('current_year') is not None
-                else None
-            ),
-            'previous_year': (
-                total_debt.get('previous_year') - cash.get('previous_year')
-                if total_debt.get('previous_year') is not None and cash.get('previous_year') is not None
-                else None
-            )
-        }
+        except (openai.RateLimitError, openai.APIError) as e:
+            print(f"Rate limit error for metric {metric}, retrying: {str(e)}")
+            raise
+        except Exception as e:
+            print(f"Error processing metric {metric}: {str(e)}")
+            return {"periods": []}
 
     def analyze_statements(self) -> pd.DataFrame:
-        """Main method to analyze the IFRS statements and extract all required figures."""
-        # Extract text and create vector store
-        self.extract_pdf_text()
-        self.create_vector_store()
+        """Analyze IFRS statements with flexible period handling."""
+        try:
+            self.extract_pdf_text()
+            self.create_vector_store()
 
-        # List of metrics to extract
-        metrics = [
-            'total_debt',
-            'revenue',
-            'interest_expense',
-            'total_equity',
-            'total_assets',
-            'capex',
-            'dividends',
-            'operating_profit',
-            'ebitda',
-            'cash',
-            'net_profit'
-        ]
+            metrics = [
+                'total_debt',
+                'revenue',
+                'interest_expense',
+                'total_equity',
+                'total_assets',
+                'capex',
+                'dividends',
+                'operating_profit',
+                'ebitda',
+                'cash',
+                'net_profit'
+            ]
 
-        # Extract each metric
-        for metric in metrics:
-            self.extracted_figures[metric] = self.extract_figure_with_llm(metric)
+            # Extract each metric
+            data = []
+            for metric in metrics:
+                self._wait_for_rate_limit()
+                result = self.extract_figure_with_llm(metric)
+                for period in result.get('periods', []):
+                    data.append({
+                        'Metric': metric,
+                        'Date': period['date'],
+                        'Period Type': period['period_type'],
+                        'Value': period['value']
+                    })
 
-        # Calculate Net Debt
-        self.extracted_figures['net_debt'] = self.calculate_net_debt()
-
-        # Create DataFrame for reporting
-        data = {
-            'Metric': [],
-            'Current Year': [],
-            'Previous Year': []
-        }
-
-        for metric, values in self.extracted_figures.items():
-            data['Metric'].append(metric)
-            data['Current Year'].append(values['current_year'])
-            data['Previous Year'].append(values['previous_year'])
-
-        return pd.DataFrame(data)
+            return pd.DataFrame(data)
+            
+        except Exception as e:
+            print(f"Error in analyze_statements: {str(e)}")
+            raise
 
     @staticmethod
     def format_value(value: Optional[float]) -> str:
-        """Format currency values with millions/billions notation."""
         if value is None:
             return "N/A"
         if abs(value) >= 1000:

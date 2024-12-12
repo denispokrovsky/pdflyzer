@@ -37,7 +37,7 @@ def create_comparison_chart(df: pd.DataFrame, metric: str) -> go.Figure:
     return fig
 
 def main():
-    st.title("🎯 R. IFRS Statement Analyzer v.2.1")
+    st.title("🎯 R. IFRS Statement Analyzer v.2.2")
     
     st.markdown("""
     This app analyzes Russian IFRS financial statements and extracts key financial metrics.
@@ -71,6 +71,11 @@ def main():
             formatted_df = results_df.copy()
             formatted_df['Value'] = formatted_df['Value'].apply(RussianIFRSAnalyzer.format_value)
 
+            # Display in Streamlit
+            st.dataframe(
+                formatted_df.sort_values(['Date', 'Metric']),
+                use_container_width=True
+)
 
             #extracted_text = analyzer.extract_pdf_text()
             
