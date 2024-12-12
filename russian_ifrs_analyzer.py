@@ -41,6 +41,18 @@ class RussianIFRSAnalyzer:
         self.last_request_time = 0
         self.min_request_interval = 1.25
 
+    def extract_pdf_text(self) -> List[str]:
+        """Extract text from PDF using OCR."""
+        images = pdf2image.convert_from_path(self.pdf_path, first_page=1, last_page=10)
+        
+        for image in images:
+            text = pytesseract.image_to_string(image, lang='rus')
+            self.pages_text.append(text)
+        
+        return self.pages_text
+
+
+
     def create_vector_store(self):
         """Create FAISS vector store from PDF content."""
         text_splitter = RecursiveCharacterTextSplitter(
