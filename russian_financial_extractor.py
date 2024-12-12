@@ -1,141 +1,240 @@
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain_openai import OpenAIEmbeddings
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from langchain.schema import Document
 import pandas as pd
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
-import re
+from typing import List, Dict, Optional, Any
+from tenacity import retry, stop_after_attempt, wait_exponential
+import openai
+import time
+import pdf2image
+import pytesseract
+import os
 from datetime import datetime
 
-@dataclass
-class FinancialPeriod:
-    end_date: datetime
-    period_type: str  # '3M', '6M', '9M', '12M'
-    year: int
-
-class RussianFinancialExtractor:
-    """Extract financial data from Russian financial statements with flexible period handling."""
+class RussianIFRSAnalyzer:
+    def __init__(self, pdf_path: str, openai_api_key: str, max_retries: int = 5):
+        self.pdf_path = pdf_path
+        self.openai_api_key = openai_api_key
+        self.max_retries = max_retries
+        os.environ['OPENAI_API_KEY'] = openai_api_key
+        
+        self.llm = ChatOpenAI(
+            temperature=0,
+            model="gpt-4o-mini",
+            max_retries=max_retries,
+            request_timeout=30
+        )
+        
+        self.embeddings = OpenAIEmbeddings(
+            max_retries=max_retries,
+            request_timeout=30
+        )
+        
+        self.pages_text = []
+        self.vector_store = None
+        self.extracted_figures = {}
+        self.reporting_periods = None
+        
+        self.last_request_time = 0
+        self.min_request_interval = 1.25
     
-    def __init__(self):
-        self.balance_sheet_metrics = {
-            'total_assets': r'Итого активы',
-            'current_assets': r'Итого текущие активы',
-            'non_current_assets': r'Итого долгосрочные активы',
-            'total_liabilities': r'Итого обязательства',
-            'current_liabilities': r'Итого текущие обязательства',
-            'non_current_liabilities': r'Итого долгосрочные обязательства',
-            'total_equity': r'Итого капитал',
-            'cash_equivalents': r'Денежные средства и их эквиваленты'
-        }
-        
-        self.income_statement_metrics = {
-            'revenue': r'Итого выручка от реализации',
-            'operating_profit': r'Прибыль от операционной деятельности',
-            'profit_before_tax': r'Прибыль до налога на прибыль',
-            'net_profit': r'Прибыль',
-            'ebitda': r'EBITDA'  # May need custom calculation
-        }
+    def _wait_for_rate_limit(self):
+        """Ensure minimum time between requests."""
+        elapsed = time.time() - self.last_request_time
+        if elapsed < self.min_request_interval:
+            time.sleep(self.min_request_interval - elapsed)
+        self.last_request_time = time.time()
 
-    def detect_periods(self, text: str) -> List[FinancialPeriod]:
-        """Detect reporting periods from the document text."""
-        periods = []
-        
-        # Look for date patterns in header and near financial tables
-        date_patterns = [
-            r'за (?:год|период).+?(\d{2}).(\d{2}).(\d{4})',
-            r'на (\d{2}).(\d{2}).(\d{4})',
-            r'за (\d+) месяц.+?(\d{4})'
-        ]
-        
-        for pattern in date_patterns:
-            matches = re.finditer(pattern, text, re.IGNORECASE)
-            for match in matches:
-                if len(match.groups()) == 3:  # Full date pattern
-                    date = datetime(int(match.group(3)), int(match.group(2)), int(match.group(1)))
-                    # Determine period type based on context
-                    period_type = self._determine_period_type(text, match.start())
-                    periods.append(FinancialPeriod(date, period_type, date.year))
-                elif len(match.groups()) == 2:  # Month count + year pattern
-                    months = int(match.group(1))
-                    year = int(match.group(2))
-                    period_type = f"{months}M"
-                    # Construct end date based on month count
-                    date = datetime(year, (months % 12) or 12, 31)
-                    periods.append(FinancialPeriod(date, period_type, year))
-        
-        return periods
 
-    def _determine_period_type(self, text: str, position: int) -> str:
-        """Determine the period type based on surrounding context."""
-        context = text[max(0, position-100):position+100]
-        if re.search(r'(три|3|первый).+?(месяц|квартал)', context, re.IGNORECASE):
-            return '3M'
-        elif re.search(r'(шесть|6|полугод)', context, re.IGNORECASE):
-            return '6M'
-        elif re.search(r'(девять|9)', context, re.IGNORECASE):
-            return '9M'
-        elif re.search(r'(двенадцать|12|год)', context, re.IGNORECASE):
-            return '12M'
-        return '12M'  # Default to annual if unclear
-
-    def extract_value(self, text: str, metric_pattern: str) -> Optional[float]:
-        """Extract numerical value for a given metric pattern."""
-        # Look for the metric pattern followed by numbers
-        value_pattern = f"{metric_pattern}.*?(\d+'?\d*'?\d*)"
-        match = re.search(value_pattern, text, re.MULTILINE)
-        if match:
-            # Clean up the number string and convert to float
-            value_str = match.group(1).replace("'", "")
-            try:
-                return float(value_str)
-            except ValueError:
-                return None
-        return None
-
-    def extract_metrics(self, text: str, metrics_dict: Dict[str, str]) -> Dict[str, float]:
-        """Extract all metrics from the given dictionary."""
-        results = {}
-        for metric_name, pattern in metrics_dict.items():
-            value = self.extract_value(text, pattern)
-            if value is not None:
-                results[metric_name] = value
-        return results
-
-    def process_document(self, text: str) -> Dict[str, Dict]:
-        """Process the document and extract all financial data with period information."""
-        periods = self.detect_periods(text)
-        results = {}
+    def create_vector_store(self):
+        """Create FAISS vector store from PDF content."""
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=8000,
+            chunk_overlap=100
+        )
         
-        for period in periods:
-            period_key = f"{period.period_type}_{period.year}"
-            results[period_key] = {
-                'period': period,
-                'balance_sheet': self.extract_metrics(text, self.balance_sheet_metrics),
-                'income_statement': self.extract_metrics(text, self.income_statement_metrics)
+        documents = []
+        for page_num, text in enumerate(self.pages_text, 1):
+            # Add more metadata about the page content
+            is_header = page_num <= 2  # First two pages usually contain header info
+            is_financial_statement = any(marker in text.lower() for marker in [
+                'отчет о финансовом положении',
+                'бухгалтерский баланс',
+                'отчет о прибылях',
+                'отчет о движении денежных средств'
+            ])
+            
+            chunks = text_splitter.split_text(text)
+            for chunk in chunks:
+                doc = Document(
+                    page_content=chunk,
+                    metadata={
+                        "page": page_num,
+                        "is_header": is_header,
+                        "is_financial_statement": is_financial_statement
+                    }
+                )
+                documents.append(doc)
+
+        self.vector_store = FAISS.from_documents(documents, self.embeddings)
+
+    def get_relevant_context(self, query: str, k: int = 2, filter_dict: Optional[Dict] = None) -> str:
+        """Retrieve relevant context with optional metadata filtering."""
+        self._wait_for_rate_limit()
+        search_kwargs = {"k": k}
+        if filter_dict:
+            search_kwargs["filter"] = filter_dict
+            
+        docs = self.vector_store.similarity_search(query, **search_kwargs)
+        return "\n".join([doc.page_content for doc in docs])
+
+    def extract_reporting_periods(self) -> Dict[str, Any]:
+        """Extract reporting period information using RAG."""
+        # First, get context from header pages
+        header_context = self.get_relevant_context(
+            "дата отчет отчетность период",
+            k=3,
+            filter_dict={"is_header": True}
+        )
+        
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are a financial analyst expert in IFRS statements.
+            Analyze the given context and identify the reporting periods mentioned.
+            The context is in Russian. Return ONLY a JSON with this structure:
+            {
+                "statement_date": "YYYY-MM-DD",
+                "period_type": "3M"/"6M"/"9M"/"12M",
+                "comparative_date": "YYYY-MM-DD" or null,
+                "statement_type": "interim"/"annual",
+                "year": YYYY
             }
             
-            # Calculate EBITDA if not directly available
-            if 'ebitda' not in results[period_key]['income_statement']:
-                operating_profit = results[period_key]['income_statement'].get('operating_profit')
-                depreciation = self.extract_value(text, r'знос, истощение и амортизация')
-                if operating_profit is not None and depreciation is not None:
-                    results[period_key]['income_statement']['ebitda'] = operating_profit + depreciation
-        
-        return results
+            Look for:
+            - The main reporting date
+            - Whether it's an interim or annual report
+            - The comparative period date if mentioned
+            - The length of the reporting period (3,6,9,12 months)"""),
+            ("user", f"Context:\n{header_context}")
+        ])
 
-    def format_results(self, results: Dict[str, Dict]) -> pd.DataFrame:
-        """Format results into a DataFrame with proper multi-index."""
-        data = []
-        for period_key, period_data in results.items():
-            period = period_data['period']
-            
-            # Combine all metrics
-            metrics = {}
-            metrics.update({f"bs_{k}": v for k, v in period_data['balance_sheet'].items()})
-            metrics.update({f"is_{k}": v for k, v in period_data['income_statement'].items()})
-            
-            data.append({
-                'period_type': period.period_type,
-                'year': period.year,
-                'end_date': period.end_date,
-                **metrics
-            })
+        self._wait_for_rate_limit()
+        response = self.llm(prompt.format_messages())
+        return eval(response.content)
+
+    def extract_figure_with_llm(self, metric: str) -> Dict[str, Any]:
+        """Extract specific financial metric using LLM with rate limiting."""
+        # First get the statement type context
+        statement_type = "balance" if metric in [
+            'total_debt', 'total_equity', 'total_assets', 'cash'
+        ] else "income"
         
-        return pd.DataFrame(data)
+        filter_dict = {"is_financial_statement": True}
+        
+        metric_queries = {
+            'total_debt': 'долгосрочные заемные средства OR краткосрочные заемные средства',
+            'revenue': 'выручка от реализации OR доходы от реализации',
+            'interest_expense': 'процентные расходы OR расходы в виде процентов',
+            'total_equity': 'итого капитал',
+            'total_assets': 'итого активы',
+            'capex': 'капитальные затраты OR приобретение основных средств',
+            'dividends': 'дивиденды выплаченные',
+            'operating_profit': 'прибыль от операционной деятельности',
+            'ebitda': 'EBITDA OR прибыль до вычета процентов налогов и амортизации',
+            'cash': 'денежные средства и их эквиваленты',
+            'net_profit': 'прибыль OR чистая прибыль'
+        }
+
+        query = metric_queries.get(metric, metric)
+        context = self.get_relevant_context(query, k=2, filter_dict=filter_dict)
+
+        # Include reporting period information in the context
+        if self.reporting_periods:
+            context = f"Report date: {self.reporting_periods['statement_date']}\nPeriod type: {self.reporting_periods['period_type']}\n\n{context}"
+
+        self._wait_for_rate_limit()
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are a financial analyst expert in IFRS statements.
+            Extract the numerical values for the specified metric from the given context.
+            The context is in Russian. Consider the reporting date and period provided.
+            Return ONLY a JSON with this structure:
+            {
+                "reported": {
+                    "value": float or null,
+                    "date": "YYYY-MM-DD",
+                    "period_type": "3M"/"6M"/"9M"/"12M" or null
+                },
+                "comparative": {
+                    "value": float or null,
+                    "date": "YYYY-MM-DD",
+                    "period_type": "3M"/"6M"/"9M"/"12M" or null
+                }
+            }"""),
+            ("user", f"Metric to extract: {metric}\nStatement type: {statement_type}\n\nContext:\n{context}")
+        ])
+
+        try:
+            response = self.llm(prompt.format_messages())
+            return eval(response.content)
+        except Exception as e:
+            print(f"Error processing metric {metric}: {str(e)}")
+            return {
+                "reported": {"value": None, "date": None, "period_type": None},
+                "comparative": {"value": None, "date": None, "period_type": None}
+            }
+
+    def analyze_statements(self) -> pd.DataFrame:
+        """Analyze IFRS statements using RAG."""
+        try:
+            # Extract text and create vector store
+            self.extract_pdf_text()
+            self.create_vector_store()
+            
+            # First, extract reporting period information
+            self.reporting_periods = self.extract_reporting_periods()
+
+            metrics = [
+                'total_debt', 'revenue', 'interest_expense', 'total_equity',
+                'total_assets', 'capex', 'dividends', 'operating_profit',
+                'ebitda', 'cash', 'net_profit'
+            ]
+
+            data = {
+                'Metric': [],
+                'Date': [],
+                'Period Type': [],
+                'Value': [],
+                'Comparative Date': [],
+                'Comparative Period Type': [],
+                'Comparative Value': []
+            }
+
+            for metric in metrics:
+                self._wait_for_rate_limit()
+                result = self.extract_figure_with_llm(metric)
+                
+                data['Metric'].append(metric)
+                data['Date'].append(result['reported']['date'])
+                data['Period Type'].append(result['reported']['period_type'])
+                data['Value'].append(result['reported']['value'])
+                data['Comparative Date'].append(result['comparative']['date'])
+                data['Comparative Period Type'].append(result['comparative']['period_type'])
+                data['Comparative Value'].append(result['comparative']['value'])
+
+            return pd.DataFrame(data)
+            
+        except Exception as e:
+            print(f"Error in analyze_statements: {str(e)}")
+            raise
+
+    @staticmethod
+    def format_value(value: Optional[float]) -> str:
+        """Format currency values with millions/billions notation."""
+        if value is None:
+            return "N/A"
+        if abs(value) >= 1000:
+            return f"{value/1000:.2f}B"
+        return f"{value:.2f}M"
