@@ -37,12 +37,6 @@ class RussianIFRSAnalyzer:
         )
         
         self.pages_text = []
-        self.statements = {
-            'balance_sheet': None,
-            'income_statement': None,
-            'cash_flow': None
-        }
-        self.statement_dates = {}
         
         self.last_request_time = time.time()
         self.min_request_interval = 1.25
@@ -78,29 +72,8 @@ class RussianIFRSAnalyzer:
             'dividends': ['отчет о движении денежных средств', 'дивиденды']
         }
         
-        self.pages_text = []
         self.page_dates = {}  # Store dates found on each page
 
-    def extract_date_from_page(self, text: str) -> Optional[str]:
-        """Extract date from page text."""
-        # Common date patterns in Russian financial statements
-        patterns = [
-            r'на .*?(\d{1,2})\.(\d{1,2})\.(\d{4})',
-            r'за .*?год.*?(\d{4})',
-            r'за .*?(\d{1,2})\.(\d{1,2})\.(\d{4})',
-            r'период.*?(\d{4})'
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, text)
-            if match:
-                groups = match.groups()
-                if len(groups) == 3:  # Full date
-                    return f"{groups[2]}-{groups[1]}-{groups[0]}"
-                elif len(groups) == 1:  # Year only
-                    return f"{groups[0]}-12-31"
-        
-        return None    
 
     def _wait_for_rate_limit(self):
         """Ensure minimum time between requests."""
@@ -110,22 +83,46 @@ class RussianIFRSAnalyzer:
         self.last_request_time = time.time()
 
     def _parse_llm_response(self, response: str, metric: str) -> Dict:
-        """Safely parse LLM response to JSON."""
+        """Safely parse LLM response to JSON with better cleaning."""
         print(f"\nDebug - Raw LLM response for {metric}:")
         print(response)
         
         try:
             # Clean the response string
             cleaned_response = response.strip()
+            
+            # Remove markdown code blocks if present
             if cleaned_response.startswith('```') and cleaned_response.endswith('```'):
                 cleaned_response = cleaned_response[3:-3]
+            if cleaned_response.startswith('```json') and cleaned_response.endswith('```'):
+                cleaned_response = cleaned_response[7:-3]
+            
+            # Remove 'json' if it's at the start
             if cleaned_response.startswith('json'):
                 cleaned_response = cleaned_response[4:]
+            
+            # Clean up any weird formatting
+            cleaned_response = cleaned_response.strip()
+            cleaned_response = re.sub(r'\s+', ' ', cleaned_response)  # Replace multiple spaces
+            cleaned_response = re.sub(r',\s*}', '}', cleaned_response)  # Remove trailing commas
+            cleaned_response = re.sub(r',\s*]', ']', cleaned_response)  # Remove trailing commas in arrays
+            
+            # Remove any non-JSON text before or after
+            start_idx = cleaned_response.find('{')
+            end_idx = cleaned_response.rfind('}') + 1
+            if start_idx != -1 and end_idx != 0:
+                cleaned_response = cleaned_response[start_idx:end_idx]
             
             print("\nDebug - Cleaned response:")
             print(cleaned_response)
             
-            result = json.loads(cleaned_response)
+            try:
+                result = json.loads(cleaned_response)
+            except json.JSONDecodeError:
+                # Try replacing single quotes with double quotes
+                cleaned_response = cleaned_response.replace("'", '"')
+                result = json.loads(cleaned_response)
+            
             print("\nDebug - Parsed JSON:")
             print(json.dumps(result, indent=2))
             
@@ -133,10 +130,32 @@ class RussianIFRSAnalyzer:
         except json.JSONDecodeError as e:
             print(f"\nDebug - JSON parse error: {e}")
             print(f"Failed response was: {response}")
-            return {}
+            if metric == "date_extraction":
+                return {
+                    "statement_date": None,
+                    "period_type": None,
+                    "period_description": None,
+                    "is_comparative": False
+                }
+            else:
+                return {
+                    'reported': {'value': None, 'date': None},
+                    'comparative': {'value': None, 'date': None}
+                }
         except Exception as e:
             print(f"\nDebug - Error parsing response: {e}")
-            return {}
+            if metric == "date_extraction":
+                return {
+                    "statement_date": None,
+                    "period_type": None,
+                    "period_description": None,
+                    "is_comparative": False
+                }
+            else:
+                return {
+                    'reported': {'value': None, 'date': None},
+                    'comparative': {'value': None, 'date': None}
+                }
 
     @retry(
         stop=stop_after_attempt(5),
@@ -277,7 +296,7 @@ class RussianIFRSAnalyzer:
         return best_page, date_info
 
     def extract_figure_with_llm(self, metric: str) -> Dict[str, Optional[float]]:
-        """Extract specific financial metric using LLM with date context."""
+        """Extract specific financial metric using LLM with enhanced Russian statement understanding."""
         print(f"\nDebug - Processing metric: {metric}")
         
         page_num, date_info = self.find_metric_page(metric)
@@ -295,40 +314,98 @@ class RussianIFRSAnalyzer:
         self._wait_for_rate_limit()
 
         prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a financial analyst expert in IFRS statements.
-            Find and extract numerical value for the EXACT specified metric from the given page.
-            The text is in Russian. Return ONLY a JSON object in this format:
+            ("system", """You are a financial analyst expert in Russian IFRS statements.
+            Find and extract the numerical value for the specified metric.
+            Return ONLY a JSON object in this format:
             {
                 "reported": {"value": float, "date": "YYYY-MM-DD"},
                 "comparative": {"value": float, "date": "YYYY-MM-DD"}
             }
             
-            Rules:
-            1. Numbers are in millions of rubles (млн руб.)
-            2. If you see a number like 60 904, it means 60,904 million rubles
-            3. Numbers in parentheses (123) are negative values
-            4. Look for EXACT metric match, not similar ones
-            5. If value isn't clearly stated, use null
-            6. For values with 'Прим.' or 'Note', use the actual value, not the note number
-            7. Use provided statement_date for the reporting period"""),
+            Key rules for Russian IFRS statements:
+            1. Values format:
+               - Numbers are in millions of rubles (млн руб.)
+               - Number format "60 904" means 60,904 million rubles
+               - Negative values in parentheses: "(4 041)" means -4,041
+               - Note references like "Прим. 16" or "16" in a column should be ignored
+               - Numbers might use apostrophe as thousand separator: 60'904 means 60,904
+            
+            2. Statement structure:
+               - Balance sheet items titled "Отчет о финансовом положении"
+                 * Usually two columns: current period and comparative
+                 * Values as of specific date ("на 31 декабря")
+               
+               - Income statement items titled "Отчет о прибылях и убытках"
+                 * Shows period results ("за год", "за 6 месяцев")
+                 * May include YTD figures
+               
+               - Cash flow items titled "Отчет о движении денежных средств"
+                 * Shows period totals
+                 * May contain both inflows and outflows
+            
+            3. Common patterns:
+               - "Итого" indicates subtotal or total line
+               - Values might be indented under main categories
+               - Negative values often shown in parentheses
+               - Some values might have "в том числе" (including) subcategories
+            
+            4. Specific rules:
+               - For balance sheet: use line item exact matches
+               - For P&L: ensure matching the correct level of profit/revenue
+               - For cash flow: distinguish between operating, investing, financing activities
+               - If multiple matches found, use the one marked as "Итого" or main line item
+               - For negative values in parentheses, convert to negative numbers
+               
+            5. Value processing:
+               - Convert all values to millions of rubles
+               - Remove any note references (numbers in 'Прим.' column)
+               - Handle negative values in parentheses
+               - If number has thousand separator (space or apostrophe), join the parts
+            
+            If value isn't found or unclear, return null."""),
             ("user", f"""Metric to extract: {metric}
 Statement date: {date_info.get('statement_date') if date_info else None}
 Period type: {date_info.get('period_type') if date_info else None}
 Period description: {date_info.get('period_description') if date_info else None}
 Has comparative figures: {date_info.get('is_comparative') if date_info else False}
 
-Look for exactly this value in the financial statement page.
-For balance sheet items, look for direct line items.
-For income statement items, look for the specific profit/revenue line.
-For cash flow items, look in the cash flow section.
+Extract this specific value from the statement. Pay attention to:
+1. Exact metric name matches
+2. Correct statement section
+3. Total vs subcategory values
+4. Negative values in parentheses
+5. Note references to ignore
 
 Context:
 {context}""")
         ])
 
+        def process_value(raw_value: Optional[str]) -> Optional[float]:
+            """Process raw value string to proper numeric format."""
+            if raw_value is None:
+                return None
+                
+            try:
+                # Remove spaces and apostrophes used as thousand separators
+                cleaned = raw_value.replace(" ", "").replace("'", "")
+                
+                # Handle negative values in parentheses
+                if cleaned.startswith("(") and cleaned.endswith(")"):
+                    cleaned = "-" + cleaned[1:-1]
+                    
+                return float(cleaned)
+            except:
+                return None
+
         try:
             response = self.llm(prompt.format_messages())
             result = self._parse_llm_response(response.content, metric)
+            
+            # Process any returned values
+            if 'reported' in result and 'value' in result['reported']:
+                result['reported']['value'] = process_value(str(result['reported']['value']))
+            if 'comparative' in result and 'value' in result['comparative']:
+                result['comparative']['value'] = process_value(str(result['comparative']['value']))
             
             # Use date info if available
             if date_info and date_info.get('statement_date'):
