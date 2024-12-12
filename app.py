@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from russian_financial_extractor import RussianFinancialExtractor
 import tempfile
-#from russian_ifrs_analyzer import RussianIFRSAnalyzer
+from russian_ifrs_analyzer import RussianIFRSAnalyzer
 
 st.set_page_config(
     page_title="Russian IFRS Analyzer v.2.0",
@@ -37,7 +37,7 @@ def create_comparison_chart(df: pd.DataFrame, metric: str) -> go.Figure:
     return fig
 
 def main():
-    st.title("🎯 R. IFRS Statement Analyzer v.2.27")
+    st.title("🎯 R. IFRS Statement Analyzer v.2.28")
     
     st.markdown("""
     This app analyzes Russian IFRS financial statements and extracts key financial metrics.
@@ -59,12 +59,11 @@ def main():
             progress_bar.progress(20)
             status_text.text("PDF uploaded successfully. Initializing analysis...")
 
-            # Initialize analyzer with OpenAI API key from Streamlit secrets
-            analyzer = RussianFinancialExtractor(
+            analyzer = RussianIFRSAnalyzer(
                 pdf_path=tmp_file_path,
                 openai_api_key=st.secrets["openai_api_key"]
             )
-            
+
             results_df = analyzer.analyze_statements()
 
             # Format results for display
@@ -79,13 +78,6 @@ def main():
             # Display in Streamlit
             st.dataframe(formatted_df, use_container_width=True)
 
-
-            #extracted_text = analyzer.extract_pdf_text()
-            
-            # Create a formatted version of the text with page numbers
-            #formatted_text = ""
-            #for i, page_text in enumerate(extracted_text, 1):
-            #    formatted_text += f"\n=== Page {i} ===\n{page_text}\n"
 
 
             progress_bar.progress(40)

@@ -1,3 +1,4 @@
+import json
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
@@ -23,7 +24,7 @@ class RussianIFRSAnalyzer:
         
         self.llm = ChatOpenAI(
             temperature=0,
-            model="gpt-4o-mini",
+            model="gpt-4",
             max_retries=max_retries,
             request_timeout=30
         )
@@ -36,10 +37,30 @@ class RussianIFRSAnalyzer:
         self.pages_text = []
         self.vector_store = None
         self.extracted_figures = {}
-        self.reporting_periods = None
         
         self.last_request_time = 0
         self.min_request_interval = 1.25
+
+    def _parse_llm_response(self, response: str) -> Dict:
+        """Safely parse LLM response to JSON."""
+        try:
+            # Clean the response string
+            cleaned_response = response.strip()
+            # If response is wrapped in ```, remove them
+            if cleaned_response.startswith('```') and cleaned_response.endswith('```'):
+                cleaned_response = cleaned_response[3:-3]
+            # If response starts with 'json', remove it
+            if cleaned_response.startswith('json'):
+                cleaned_response = cleaned_response[4:]
+                
+            return json.loads(cleaned_response)
+        except json.JSONDecodeError as e:
+            print(f"JSON parse error: {e}")
+            print(f"Response was: {response}")
+            return {}
+        except Exception as e:
+            print(f"Error parsing response: {e}")
+            return {}
 
     def extract_pdf_text(self) -> List[str]:
         """Extract text from PDF using OCR."""
@@ -51,8 +72,6 @@ class RussianIFRSAnalyzer:
         
         return self.pages_text
 
-
-
     def create_vector_store(self):
         """Create FAISS vector store from PDF content."""
         text_splitter = RecursiveCharacterTextSplitter(
@@ -61,82 +80,24 @@ class RussianIFRSAnalyzer:
         )
         
         documents = []
-        for page_num, text in enumerate(self.pages_text, 1):
-            # Add more metadata about the page content
-            is_header = page_num <= 2  # First two pages usually contain header info
-            is_financial_statement = any(marker in text.lower() for marker in [
-                'отчет о финансовом положении',
-                'бухгалтерский баланс',
-                'отчет о прибылях',
-                'отчет о движении денежных средств'
-            ])
-            
+        for page_num, text in enumerate(self.pages_text):
             chunks = text_splitter.split_text(text)
             for chunk in chunks:
                 doc = Document(
                     page_content=chunk,
-                    metadata={
-                        "page": page_num,
-                        "is_header": is_header,
-                        "is_financial_statement": is_financial_statement
-                    }
+                    metadata={"page": page_num + 1}
                 )
                 documents.append(doc)
 
         self.vector_store = FAISS.from_documents(documents, self.embeddings)
 
-    def get_relevant_context(self, query: str, k: int = 2, filter_dict: Optional[Dict] = None) -> str:
-        """Retrieve relevant context with optional metadata filtering."""
-        self._wait_for_rate_limit()
-        search_kwargs = {"k": k}
-        if filter_dict:
-            search_kwargs["filter"] = filter_dict
-            
-        docs = self.vector_store.similarity_search(query, **search_kwargs)
+    def get_relevant_context(self, query: str, k: int = 2) -> str:
+        """Retrieve relevant context for a specific financial metric."""
+        docs = self.vector_store.similarity_search(query, k=k)
         return "\n".join([doc.page_content for doc in docs])
 
-    def extract_reporting_periods(self) -> Dict[str, Any]:
-        """Extract reporting period information using RAG."""
-        # First, get context from header pages
-        header_context = self.get_relevant_context(
-            "дата отчет отчетность период",
-            k=3,
-            filter_dict={"is_header": True}
-        )
-        
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a financial analyst expert in IFRS statements.
-            Analyze the given context and identify the reporting periods mentioned.
-            The context is in Russian. Return ONLY a JSON with this structure:
-            {
-                "statement_date": "YYYY-MM-DD",
-                "period_type": "3M"/"6M"/"9M"/"12M",
-                "comparative_date": "YYYY-MM-DD" or null,
-                "statement_type": "interim"/"annual",
-                "year": YYYY
-            }
-            
-            Look for:
-            - The main reporting date
-            - Whether it's an interim or annual report
-            - The comparative period date if mentioned
-            - The length of the reporting period (3,6,9,12 months)"""),
-            ("user", f"Context:\n{header_context}")
-        ])
-
-        self._wait_for_rate_limit()
-        response = self.llm(prompt.format_messages())
-        return eval(response.content)
-
-    def extract_figure_with_llm(self, metric: str) -> Dict[str, Any]:
+    def extract_figure_with_llm(self, metric: str) -> Dict[str, Optional[float]]:
         """Extract specific financial metric using LLM with rate limiting."""
-        # First get the statement type context
-        statement_type = "balance" if metric in [
-            'total_debt', 'total_equity', 'total_assets', 'cash'
-        ] else "income"
-        
-        filter_dict = {"is_financial_statement": True}
-        
         metric_queries = {
             'total_debt': 'долгосрочные заемные средства OR краткосрочные заемные средства',
             'revenue': 'выручка от реализации OR доходы от реализации',
@@ -152,67 +113,61 @@ class RussianIFRSAnalyzer:
         }
 
         query = metric_queries.get(metric, metric)
-        context = self.get_relevant_context(query, k=2, filter_dict=filter_dict)
-
-        # Include reporting period information in the context
-        if self.reporting_periods:
-            context = f"Report date: {self.reporting_periods['statement_date']}\nPeriod type: {self.reporting_periods['period_type']}\n\n{context}"
+        context = self.get_relevant_context(query)
 
         self._wait_for_rate_limit()
 
         prompt = ChatPromptTemplate.from_messages([
             ("system", """You are a financial analyst expert in IFRS statements.
             Extract the numerical values for the specified metric from the given context.
-            The context is in Russian. Consider the reporting date and period provided.
-            Return ONLY a JSON with this structure:
-            {
-                "reported": {
-                    "value": float or null,
-                    "date": "YYYY-MM-DD",
-                    "period_type": "3M"/"6M"/"9M"/"12M" or null
-                },
-                "comparative": {
-                    "value": float or null,
-                    "date": "YYYY-MM-DD",
-                    "period_type": "3M"/"6M"/"9M"/"12M" or null
-                }
-            }"""),
-            ("user", f"Metric to extract: {metric}\nStatement type: {statement_type}\n\nContext:\n{context}")
+            The context is in Russian. Return ONLY a JSON with two keys:
+            'reported': {'value': float or null, 'date': 'YYYY-MM-DD'},
+            'comparative': {'value': float or null, 'date': 'YYYY-MM-DD'}
+            
+            Important:
+            - Convert all numbers to millions
+            - If number is in billions, multiply by 1000
+            - If number is in thousands, divide by 1000
+            - Handle negative values appropriately (numbers in parentheses are negative)
+            - If you can't find a value or date, use null"""),
+            ("user", f"Metric to extract: {metric}\n\nContext:\n{context}")
         ])
 
         try:
             response = self.llm(prompt.format_messages())
-            return eval(response.content)
+            return self._parse_llm_response(response.content)
         except Exception as e:
             print(f"Error processing metric {metric}: {str(e)}")
             return {
-                "reported": {"value": None, "date": None, "period_type": None},
-                "comparative": {"value": None, "date": None, "period_type": None}
+                'reported': {'value': None, 'date': None},
+                'comparative': {'value': None, 'date': None}
             }
 
     def analyze_statements(self) -> pd.DataFrame:
         """Analyze IFRS statements using RAG."""
         try:
-            # Extract text and create vector store
             self.extract_pdf_text()
             self.create_vector_store()
-            
-            # First, extract reporting period information
-            self.reporting_periods = self.extract_reporting_periods()
 
             metrics = [
-                'total_debt', 'revenue', 'interest_expense', 'total_equity',
-                'total_assets', 'capex', 'dividends', 'operating_profit',
-                'ebitda', 'cash', 'net_profit'
+                'total_debt',
+                'revenue',
+                'interest_expense',
+                'total_equity',
+                'total_assets',
+                'capex',
+                'dividends',
+                'operating_profit',
+                'ebitda',
+                'cash',
+                'net_profit'
             ]
 
             data = {
                 'Metric': [],
                 'Date': [],
-                'Period Type': [],
                 'Value': [],
                 'Comparative Date': [],
-                'Comparative Period Type': [],
                 'Comparative Value': []
             }
 
@@ -220,13 +175,15 @@ class RussianIFRSAnalyzer:
                 self._wait_for_rate_limit()
                 result = self.extract_figure_with_llm(metric)
                 
+                # Safely extract values using get() method
+                reported = result.get('reported', {})
+                comparative = result.get('comparative', {})
+                
                 data['Metric'].append(metric)
-                data['Date'].append(result['reported']['date'])
-                data['Period Type'].append(result['reported']['period_type'])
-                data['Value'].append(result['reported']['value'])
-                data['Comparative Date'].append(result['comparative']['date'])
-                data['Comparative Period Type'].append(result['comparative']['period_type'])
-                data['Comparative Value'].append(result['comparative']['value'])
+                data['Date'].append(reported.get('date'))
+                data['Value'].append(reported.get('value'))
+                data['Comparative Date'].append(comparative.get('date'))
+                data['Comparative Value'].append(comparative.get('value'))
 
             return pd.DataFrame(data)
             
