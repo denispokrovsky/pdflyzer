@@ -101,7 +101,7 @@ def calculate_ratios(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(ratios)
 
 def main():
-    st.title("🎯 R. IFRS Statement Analyzer v.2.30")
+    st.title("🎯 R. IFRS Statement Analyzer v.2.31")
     
     st.markdown("""
     This app analyzes Russian IFRS financial statements and extracts key financial metrics.
@@ -123,21 +123,28 @@ def main():
             progress_bar.progress(20)
             status_text.text("PDF uploaded successfully. Initializing analysis...")
 
-            with st.expander("Show Debug Output", expanded=True):
-                analyzer = RussianIFRSAnalyzer(
+            # Create debug output container first
+            debug_expander = st.expander("Debug Output", expanded=True)
+            
+            # Capture print output
+            stdout = io.StringIO()
+            sys.stdout = stdout
+            
+            # Initialize analyzer and run analysis
+            analyzer = RussianIFRSAnalyzer(
                 pdf_path=tmp_file_path,
                 openai_api_key=st.secrets["openai_api_key"]
-                )
-                results_df = analyzer.analyze_statements()
-
-
-            st.text("Debug Output:")
-            debug_container = st.empty()
-
+            )
+            
             progress_bar.progress(40)
             status_text.text("Analyzing financial statements...")
             
             results_df = analyzer.analyze_statements()
+            
+            # Restore stdout and display debug output
+            sys.stdout = sys.__stdout__
+            with debug_expander:
+                st.text_area("Debug Log", value=stdout.getvalue(), height=400)
 
             progress_bar.progress(80)
             status_text.text("Formatting results...")
