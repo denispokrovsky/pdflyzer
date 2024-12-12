@@ -212,45 +212,7 @@ class RussianIFRSAnalyzer:
                     print(f"\nDebug - Found {statement_type} on page {page_num + 1}")
                     print(f"Debug - Date: {self.statement_dates.get(statement_type)}")
 
-    def extract_date_with_llm(self, page_text: str) -> Dict[str, Optional[str]]:
-        """Extract reporting dates from page text using LLM."""
-        print("\nDebug - Extracting dates with LLM")
-        
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a financial expert analyzing Russian IFRS statements.
-            Extract the reporting date and period type from the given page.
-            Return ONLY a JSON object with this structure:
-            {
-                "statement_date": "YYYY-MM-DD",  # Main reporting date
-                "period_type": "3M"/"6M"/"9M"/"12M",  # Reporting period
-                "period_description": string,  # Description like "Year ended 31 December 2023"
-                "is_comparative": boolean  # If this page shows comparative figures
-            }
-            
-            Look for:
-            - "на [date]" for balance sheet dates
-            - "за [period] [year]" for income statement periods
-            - Standard dates like "31 декабря 2023"
-            - Period indicators like "за год", "за 6 месяцев"
-            
-            If date/period not found, use null for that field."""),
-            ("user", f"Extract reporting date and period from this page:\n\n{page_text[:1000]}")
-        ])
 
-        try:
-            self._wait_for_rate_limit()
-            response = self.llm(prompt.format_messages())
-            result = self._parse_llm_response(response.content, "date_extraction")
-            print(f"\nDebug - Extracted dates: {result}")
-            return result
-        except Exception as e:
-            print(f"\nDebug - Error extracting dates: {str(e)}")
-            return {
-                "statement_date": None,
-                "period_type": None,
-                "period_description": None,
-                "is_comparative": False
-            }
 
     def find_metric_page(self, metric: str) -> Tuple[int, Dict[str, Any]]:
         """Find the most relevant page for a given metric and extract its dates."""
@@ -295,10 +257,44 @@ class RussianIFRSAnalyzer:
         print(f"Debug - Date info: {date_info}")
         return best_page, date_info
 
+    def extract_date_with_llm(self, page_text: str) -> Dict[str, Optional[str]]:
+        """Extract reporting dates from page text using LLM."""
+        print("\nDebug - Extracting dates with LLM")
+        
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", """Extract the reporting date from Russian IFRS statement page.
+            Return simple JSON in exactly this format (no extra spaces or newlines):
+            {"statement_date":"YYYY-MM-DD","period_type":"12M","period_description":"text","is_comparative":false}
+            
+            Rules:
+            - For "на 31 декабря 2023" use "2023-12-31"
+            - For "за год" use "12M" as period_type
+            - For "за 6 месяцев" use "6M" as period_type
+            - Set is_comparative to true if page shows two periods
+            - If date not found, use null"""),
+            ("user", f"Extract date from:\n{page_text[:500]}")
+        ])
+
+        try:
+            self._wait_for_rate_limit()
+            response = self.llm(prompt.format_messages())
+            # Print raw response for debugging
+            print(f"\nDebug - Raw date response:")
+            print(response.content)
+            result = self._parse_llm_response(response.content, "date_extraction")
+            print(f"\nDebug - Parsed date result: {result}")
+            return result
+        except Exception as e:
+            print(f"\nDebug - Error extracting dates: {str(e)}")
+            return {
+                "statement_date": None,
+                "period_type": None,
+                "period_description": None,
+                "is_comparative": False
+            }
+
     def extract_figure_with_llm(self, metric: str) -> Dict[str, Optional[float]]:
         """Extract specific financial metric using LLM with enhanced Russian statement understanding."""
-        print(f"\nDebug - Processing metric: {metric}")
-        
         page_num, date_info = self.find_metric_page(metric)
         if page_num is None:
             print(f"Debug - Could not find relevant page for {metric}")
@@ -314,105 +310,43 @@ class RussianIFRSAnalyzer:
         self._wait_for_rate_limit()
 
         prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a financial analyst expert in Russian IFRS statements.
-            Find and extract the numerical value for the specified metric.
-            Return ONLY a JSON object in this format:
-            {
-                "reported": {"value": float, "date": "YYYY-MM-DD"},
-                "comparative": {"value": float, "date": "YYYY-MM-DD"}
-            }
+            ("system", """Extract the numeric value for the specified metric from Russian IFRS statement.
+            Return simple JSON in exactly this format (no extra spaces or newlines):
+            {"reported":{"value":123.45,"date":"2023-12-31"},"comparative":{"value":null,"date":null}}
             
-            Key rules for Russian IFRS statements:
-            1. Values format:
-               - Numbers are in millions of rubles (млн руб.)
-               - Number format "60 904" means 60,904 million rubles
-               - Negative values in parentheses: "(4 041)" means -4,041
-               - Note references like "Прим. 16" or "16" in a column should be ignored
-               - Numbers might use apostrophe as thousand separator: 60'904 means 60,904
+            Rules:
+            1. Numbers:
+               - Values in millions (млн руб.)
+               - "60 904" means 60904.0
+               - "(4 041)" means -4041.0
+               - "Прим. 16" - ignore note numbers
+               - Join numbers split across lines
             
-            2. Statement structure:
-               - Balance sheet items titled "Отчет о финансовом положении"
-                 * Usually two columns: current period and comparative
-                 * Values as of specific date ("на 31 декабря")
-               
-               - Income statement items titled "Отчет о прибылях и убытках"
-                 * Shows period results ("за год", "за 6 месяцев")
-                 * May include YTD figures
-               
-               - Cash flow items titled "Отчет о движении денежных средств"
-                 * Shows period totals
-                 * May contain both inflows and outflows
+            2. Statement types:
+               - Balance sheet: use line item totals
+               - Income statement: use correct profit level
+               - Cash flow: distinguish between positive/negative flows
             
-            3. Common patterns:
-               - "Итого" indicates subtotal or total line
-               - Values might be indented under main categories
-               - Negative values often shown in parentheses
-               - Some values might have "в том числе" (including) subcategories
-            
-            4. Specific rules:
-               - For balance sheet: use line item exact matches
-               - For P&L: ensure matching the correct level of profit/revenue
-               - For cash flow: distinguish between operating, investing, financing activities
-               - If multiple matches found, use the one marked as "Итого" or main line item
-               - For negative values in parentheses, convert to negative numbers
-               
-            5. Value processing:
-               - Convert all values to millions of rubles
-               - Remove any note references (numbers in 'Прим.' column)
-               - Handle negative values in parentheses
-               - If number has thousand separator (space or apostrophe), join the parts
-            
-            If value isn't found or unclear, return null."""),
-            ("user", f"""Metric to extract: {metric}
-Statement date: {date_info.get('statement_date') if date_info else None}
-Period type: {date_info.get('period_type') if date_info else None}
-Period description: {date_info.get('period_description') if date_info else None}
-Has comparative figures: {date_info.get('is_comparative') if date_info else False}
+            If value not found, use null."""),
+            ("user", f"""Find this exact metric: {metric}
+In this context (pay attention to whether it shows comparative figures):
 
-Extract this specific value from the statement. Pay attention to:
-1. Exact metric name matches
-2. Correct statement section
-3. Total vs subcategory values
-4. Negative values in parentheses
-5. Note references to ignore
-
-Context:
 {context}""")
         ])
 
-        def process_value(raw_value: Optional[str]) -> Optional[float]:
-            """Process raw value string to proper numeric format."""
-            if raw_value is None:
-                return None
-                
-            try:
-                # Remove spaces and apostrophes used as thousand separators
-                cleaned = raw_value.replace(" ", "").replace("'", "")
-                
-                # Handle negative values in parentheses
-                if cleaned.startswith("(") and cleaned.endswith(")"):
-                    cleaned = "-" + cleaned[1:-1]
-                    
-                return float(cleaned)
-            except:
-                return None
-
         try:
             response = self.llm(prompt.format_messages())
+            # Print raw response for debugging
+            print(f"\nDebug - Raw metric response:")
+            print(response.content)
             result = self._parse_llm_response(response.content, metric)
-            
-            # Process any returned values
-            if 'reported' in result and 'value' in result['reported']:
-                result['reported']['value'] = process_value(str(result['reported']['value']))
-            if 'comparative' in result and 'value' in result['comparative']:
-                result['comparative']['value'] = process_value(str(result['comparative']['value']))
+            print(f"\nDebug - Parsed metric result: {result}")
             
             # Use date info if available
             if date_info and date_info.get('statement_date'):
                 if 'reported' in result:
                     result['reported']['date'] = date_info['statement_date']
                 
-                # For comparative date, use previous year with same period end
                 if 'comparative' in result and result['comparative'].get('value') is not None:
                     try:
                         current_date = datetime.strptime(date_info['statement_date'], '%Y-%m-%d')
