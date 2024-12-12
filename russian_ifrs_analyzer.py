@@ -38,8 +38,16 @@ class RussianIFRSAnalyzer:
         self.vector_store = None
         self.extracted_figures = {}
         
-        self.last_request_time = 0
-        self.min_request_interval = 1.25
+        # Rate limiting parameters
+        self.last_request_time = time.time()
+        self.min_request_interval = 1.25  # seconds
+
+    def _wait_for_rate_limit(self):
+        """Ensure minimum time between requests."""
+        elapsed = time.time() - self.last_request_time
+        if elapsed < self.min_request_interval:
+            time.sleep(self.min_request_interval - elapsed)
+        self.last_request_time = time.time()
 
     def _parse_llm_response(self, response: str) -> Dict:
         """Safely parse LLM response to JSON."""
@@ -62,6 +70,11 @@ class RussianIFRSAnalyzer:
             print(f"Error parsing response: {e}")
             return {}
 
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=4, max=60),
+        reraise=True
+    )
     def extract_pdf_text(self) -> List[str]:
         """Extract text from PDF using OCR."""
         images = pdf2image.convert_from_path(self.pdf_path, first_page=1, last_page=10)
@@ -72,6 +85,11 @@ class RussianIFRSAnalyzer:
         
         return self.pages_text
 
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=4, max=60),
+        reraise=True
+    )
     def create_vector_store(self):
         """Create FAISS vector store from PDF content."""
         text_splitter = RecursiveCharacterTextSplitter(
@@ -89,13 +107,25 @@ class RussianIFRSAnalyzer:
                 )
                 documents.append(doc)
 
+        self._wait_for_rate_limit()
         self.vector_store = FAISS.from_documents(documents, self.embeddings)
 
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=4, max=60),
+        reraise=True
+    )
     def get_relevant_context(self, query: str, k: int = 2) -> str:
         """Retrieve relevant context for a specific financial metric."""
+        self._wait_for_rate_limit()
         docs = self.vector_store.similarity_search(query, k=k)
         return "\n".join([doc.page_content for doc in docs])
 
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=4, max=60),
+        reraise=True
+    )
     def extract_figure_with_llm(self, metric: str) -> Dict[str, Optional[float]]:
         """Extract specific financial metric using LLM with rate limiting."""
         metric_queries = {
