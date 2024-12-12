@@ -14,7 +14,7 @@ import pytesseract
 import os
 from datetime import datetime
 
-class RussianIFRSAnalyzer:
+class RussianFinancialExtractor:
     def __init__(self, pdf_path: str, openai_api_key: str, max_retries: int = 5):
         self.pdf_path = pdf_path
         self.openai_api_key = openai_api_key
