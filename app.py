@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from russian_financial_extractor import RussianFinancialExtractor
 import tempfile
-from russian_ifrs_analyzer import RussianIFRSAnalyzer
+#from russian_ifrs_analyzer import RussianIFRSAnalyzer
 
 st.set_page_config(
     page_title="Russian IFRS Analyzer v.2.0",
@@ -60,7 +60,7 @@ def main():
             status_text.text("PDF uploaded successfully. Initializing analysis...")
 
             # Initialize analyzer with OpenAI API key from Streamlit secrets
-            analyzer = RussianIFRSAnalyzer(
+            analyzer = RussianFinancialExtractor(
                 pdf_path=tmp_file_path,
                 openai_api_key=st.secrets["openai_api_key"]
             )
