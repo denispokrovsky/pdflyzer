@@ -80,7 +80,27 @@ class RussianIFRSAnalyzer:
         
         self.pages_text = []
         self.page_dates = {}  # Store dates found on each page
-    
+
+    def extract_date_from_page(self, text: str) -> Optional[str]:
+        """Extract date from page text."""
+        # Common date patterns in Russian financial statements
+        patterns = [
+            r'на .*?(\d{1,2})\.(\d{1,2})\.(\d{4})',
+            r'за .*?год.*?(\d{4})',
+            r'за .*?(\d{1,2})\.(\d{1,2})\.(\d{4})',
+            r'период.*?(\d{4})'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                groups = match.groups()
+                if len(groups) == 3:  # Full date
+                    return f"{groups[2]}-{groups[1]}-{groups[0]}"
+                elif len(groups) == 1:  # Year only
+                    return f"{groups[0]}-12-31"
+        
+        return None    
 
     def _wait_for_rate_limit(self):
         """Ensure minimum time between requests."""
