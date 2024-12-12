@@ -172,7 +172,7 @@ class RussianIFRSAnalyzer:
                     print(f"\nDebug - Found {statement_type} on page {page_num + 1}")
                     print(f"Debug - Date: {self.statement_dates.get(statement_type)}")
 
-def extract_date_with_llm(self, page_text: str) -> Dict[str, Optional[str]]:
+    def extract_date_with_llm(self, page_text: str) -> Dict[str, Optional[str]]:
         """Extract reporting dates from page text using LLM."""
         print("\nDebug - Extracting dates with LLM")
         
