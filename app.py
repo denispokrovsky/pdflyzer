@@ -59,6 +59,10 @@ def create_comparison_chart(df: pd.DataFrame, metric: str) -> go.Figure:
     )
     return fig
 
+def update_debug(text):
+    current = debug_container.text_area("Debug Log", value=text, height=300)
+
+
 def calculate_ratios(df: pd.DataFrame) -> pd.DataFrame:
     """Calculate key financial ratios."""
     ratios = []
@@ -97,7 +101,7 @@ def calculate_ratios(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(ratios)
 
 def main():
-    st.title("🎯 R. IFRS Statement Analyzer v.2.29")
+    st.title("🎯 R. IFRS Statement Analyzer v.2.30")
     
     st.markdown("""
     This app analyzes Russian IFRS financial statements and extracts key financial metrics.
@@ -119,11 +123,16 @@ def main():
             progress_bar.progress(20)
             status_text.text("PDF uploaded successfully. Initializing analysis...")
 
-            # Initialize analyzer and process statements
-            analyzer = RussianIFRSAnalyzer(
+            with st.expander("Show Debug Output", expanded=True):
+                analyzer = RussianIFRSAnalyzer(
                 pdf_path=tmp_file_path,
                 openai_api_key=st.secrets["openai_api_key"]
-            )
+                )
+                results_df = analyzer.analyze_statements()
+
+
+            st.text("Debug Output:")
+            debug_container = st.empty()
 
             progress_bar.progress(40)
             status_text.text("Analyzing financial statements...")

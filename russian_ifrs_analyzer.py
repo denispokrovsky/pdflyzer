@@ -38,43 +38,44 @@ class RussianIFRSAnalyzer:
         self.vector_store = None
         self.extracted_figures = {}
         
-        # Rate limiting parameters
         self.last_request_time = time.time()
-        self.min_request_interval = 1.25  # seconds
+        self.min_request_interval = 1.25
 
     def _wait_for_rate_limit(self):
-        """Ensure minimum time between requests."""
         elapsed = time.time() - self.last_request_time
         if elapsed < self.min_request_interval:
             time.sleep(self.min_request_interval - elapsed)
         self.last_request_time = time.time()
 
-    def _parse_llm_response(self, response: str) -> Dict:
-        """Safely parse LLM response to JSON."""
+    def _parse_llm_response(self, response: str, metric: str) -> Dict:
+        """Safely parse LLM response to JSON with debug output."""
+        print(f"\nDebug - Raw LLM response for {metric}:")
+        print(response)
+        
         try:
             # Clean the response string
             cleaned_response = response.strip()
-            # If response is wrapped in ```, remove them
             if cleaned_response.startswith('```') and cleaned_response.endswith('```'):
                 cleaned_response = cleaned_response[3:-3]
-            # If response starts with 'json', remove it
             if cleaned_response.startswith('json'):
                 cleaned_response = cleaned_response[4:]
-                
-            return json.loads(cleaned_response)
+            
+            print("\nDebug - Cleaned response:")
+            print(cleaned_response)
+            
+            result = json.loads(cleaned_response)
+            print("\nDebug - Parsed JSON:")
+            print(json.dumps(result, indent=2))
+            
+            return result
         except json.JSONDecodeError as e:
-            print(f"JSON parse error: {e}")
-            print(f"Response was: {response}")
+            print(f"\nDebug - JSON parse error: {e}")
+            print(f"Failed response was: {response}")
             return {}
         except Exception as e:
-            print(f"Error parsing response: {e}")
+            print(f"\nDebug - Error parsing response: {e}")
             return {}
 
-    @retry(
-        stop=stop_after_attempt(5),
-        wait=wait_exponential(multiplier=1, min=4, max=60),
-        reraise=True
-    )
     def extract_pdf_text(self) -> List[str]:
         """Extract text from PDF using OCR."""
         images = pdf2image.convert_from_path(self.pdf_path, first_page=1, last_page=10)
@@ -83,13 +84,13 @@ class RussianIFRSAnalyzer:
             text = pytesseract.image_to_string(image, lang='rus')
             self.pages_text.append(text)
         
+        print("\nDebug - Extracted text from PDF:")
+        for i, page in enumerate(self.pages_text, 1):
+            print(f"\nPage {i}:")
+            print(page[:500] + "...")  # Print first 500 chars of each page
+        
         return self.pages_text
 
-    @retry(
-        stop=stop_after_attempt(5),
-        wait=wait_exponential(multiplier=1, min=4, max=60),
-        reraise=True
-    )
     def create_vector_store(self):
         """Create FAISS vector store from PDF content."""
         text_splitter = RecursiveCharacterTextSplitter(
@@ -107,27 +108,25 @@ class RussianIFRSAnalyzer:
                 )
                 documents.append(doc)
 
+        print(f"\nDebug - Created {len(documents)} document chunks")
         self._wait_for_rate_limit()
         self.vector_store = FAISS.from_documents(documents, self.embeddings)
 
-    @retry(
-        stop=stop_after_attempt(5),
-        wait=wait_exponential(multiplier=1, min=4, max=60),
-        reraise=True
-    )
     def get_relevant_context(self, query: str, k: int = 2) -> str:
         """Retrieve relevant context for a specific financial metric."""
         self._wait_for_rate_limit()
         docs = self.vector_store.similarity_search(query, k=k)
-        return "\n".join([doc.page_content for doc in docs])
+        
+        context = "\n".join([doc.page_content for doc in docs])
+        print(f"\nDebug - Retrieved context for query '{query}':")
+        print(context[:500] + "...")  # Print first 500 chars of context
+        
+        return context
 
-    @retry(
-        stop=stop_after_attempt(5),
-        wait=wait_exponential(multiplier=1, min=4, max=60),
-        reraise=True
-    )
     def extract_figure_with_llm(self, metric: str) -> Dict[str, Optional[float]]:
         """Extract specific financial metric using LLM with rate limiting."""
+        print(f"\nDebug - Processing metric: {metric}")
+        
         metric_queries = {
             'total_debt': 'долгосрочные заемные средства OR краткосрочные заемные средства',
             'revenue': 'выручка от реализации OR доходы от реализации',
@@ -165,9 +164,15 @@ class RussianIFRSAnalyzer:
 
         try:
             response = self.llm(prompt.format_messages())
-            return self._parse_llm_response(response.content)
+            result = self._parse_llm_response(response.content, metric)
+            
+            # Additional debug output for the final result
+            print(f"\nDebug - Final extracted values for {metric}:")
+            print(json.dumps(result, indent=2))
+            
+            return result
         except Exception as e:
-            print(f"Error processing metric {metric}: {str(e)}")
+            print(f"\nDebug - Error in LLM extraction for {metric}: {str(e)}")
             return {
                 'reported': {'value': None, 'date': None},
                 'comparative': {'value': None, 'date': None}
@@ -176,6 +181,7 @@ class RussianIFRSAnalyzer:
     def analyze_statements(self) -> pd.DataFrame:
         """Analyze IFRS statements using RAG."""
         try:
+            print("\nDebug - Starting analysis")
             self.extract_pdf_text()
             self.create_vector_store()
 
@@ -215,10 +221,13 @@ class RussianIFRSAnalyzer:
                 data['Comparative Date'].append(comparative.get('date'))
                 data['Comparative Value'].append(comparative.get('value'))
 
-            return pd.DataFrame(data)
+            df = pd.DataFrame(data)
+            print("\nDebug - Final DataFrame:")
+            print(df)
+            return df
             
         except Exception as e:
-            print(f"Error in analyze_statements: {str(e)}")
+            print(f"\nDebug - Error in analyze_statements: {str(e)}")
             raise
 
     @staticmethod
